@@ -147,7 +147,7 @@ flowchart LR
 ### 4.2 `Runtime Adapter`
 - **책임**: runtime별 차이(엔드포인트·포트·인증·tool call 포맷)를 내부로 숨기고 동일한 호출 방식을 제공.
 - **비책임**: prompt 조합, tool 검증, 응답 생성 정책.
-- **원칙**: `[제안]` Ollama와 llama.cpp server는 모두 OpenAI-compatible API를 제공하므로 **하나의 OpenAI-compatible adapter**로 시작하고, 포맷 차이가 실제로 문제가 될 때만 개별 adapter를 추가한다.
+- **원칙**: `[사실]` 참조 앱은 Ollama **native `/api/chat`**(stdlib urllib)을 사용 중이므로, ollama adapter는 native 포맷을, llama.cpp/원격 runtime은 OpenAI-compatible(`/v1`) 포맷을 구현하는 **두 포맷 adapter**로 시작한다. `[제안]` 둘 다 `RuntimeAdapter` protocol 뒤에 숨어 HarnessClient는 포맷을 모른다.
 
 ### 4.3 `Prompt 관리`
 - **책임**: system instruction(역할·행동 규칙·tool 사용 규칙)과 프롬프트 템플릿을 코드와 분리해 관리하고 버전을 기록.
@@ -315,8 +315,9 @@ interface HarnessChatResponse {
 ```yaml
 # configs/harness.yaml  [제안]
 runtime: ollama            # ollama | llama_cpp | openai(원격)
-model: qwen2.5:7b-instruct
-base_url: http://localhost:11434/v1   # ollama 기본
+model: local-jarvis-qwen3:8b   # 참조 앱 실사용 모델 [사실]
+api_format: native_chat    # ollama /api/chat (참조 앱 사용 [사실]) | openai_compat(/v1)
+base_url: http://127.0.0.1:11434
 profile: desktop           # desktop(4070 12GB) / laptop
 ```
 
@@ -588,7 +589,9 @@ class TTSAdapter(Protocol):
 
 - `[사실]` **정체**: Python-first 개인 AI 비서 실험(Phase 1 골격 + 로컬 Ollama 환경). React UI 없음 — `tools/*.py`, `config/*.yaml`, `prompts/*.md`, `memory/*.md`, `data/`, `logs/`, `tests/` 구조.
 - `[사실]` **모델/runtime**: `config/models.yaml` — backend `ollama`, `local-jarvis-qwen3:8b`(bulk/refinement/planning), `local-jarvis-qwen3:0.6b`(fast), RTX 4070 12GB, 2026-06-13 검증. `models/`에 커스텀 Modelfile 2개.
-- `[사실]` **LLM 연동 상태**: README 기준 "실제 Ollama 연동은 Phase 2 TODO". AGENTS 개발 순서 2번 "Ollama wrapper" = harness의 **Runtime Adapter(§7)**가 제공할 기능 — 자연스러운 통합점.
+- `[사실]` **LLM 연동 상태**: 음성 경로는 이미 Ollama와 통신 중 — `tools/voice_assistant.py`의 `ask_ollama()`가 `http://127.0.0.1:11434/api/chat`(**native 포맷**, urllib·stdlib)에 `model=local-jarvis-qwen3:8b`, `stream=False`, `temperature=0.6`, `num_predict=240`, 6턴 deque history, system prompt=`prompts/assistant_identity.md`로 호출. README의 "Ollama 연동 Phase 2 TODO"는 콘텐츠 도구(`generate_scripts.py` 등, 현재 dry-run 계획만)를 가리킨다.
+- `[사실]` **Phase 1 스텁 확인**: `safe_runner.py`는 실행을 의도적으로 비활성화("allowlist 먼저 구현"), `cost_tracker.py`는 `local_only | paid API limit: 0` 하드코딩 — harness의 gate(§8)·비용 추적이 이 자리를 실제 구현으로 대체 가능. `[제안]`
+- `[사실]` **TTS·STT 상세**: `voice.yaml` — TTS는 PowerShell `System.Speech` + `SelectVoice('Microsoft Heami Desktop')`(rate=1, Windows 전용), STT는 faster-whisper `small`·CPU·int8. `privacy.external_speech_api: false`, `safety.*` 3개 전부 false — §8 Permission Gate 기본값의 근거.
 - `[사실]` **음성**: `docs/VOICE_ASSISTANT.md` — 마이크 → faster-whisper → Ollama Qwen3 8B → Windows Microsoft Heami(TTS) → 스피커. v1 경계: push-to-talk, 대화·초안만(파일 변경·컴퓨터 제어·업로드·결제 금지), 오디오는 전사 후 삭제. Realtek 마이크 미노출 이슈 메모 있음.
 - `[사실]` **규칙(AGENTS.md)**: Ollama 기본·유료 API 0회 지향, 패키지 설치·대량 이동·삭제·게시·결제·외부 서비스 전 승인, 영구 삭제 금지(`archives/`), dry-run·로그 우선(`logs/runs.log`·`errors.log`), 백엔드 교체 가능 유지, OpenAI/Anthropic fallback 금지.
 - `[사실]` **운영 규칙(JARVIS_RULES.md)**: 읽기·초안 = 안전 작업, 이동·삭제·게시·결제·외부 전송 = 승인 작업, 로그 유지 — harness의 **Permission Gate(§8)**와 일치.
