@@ -1,8 +1,8 @@
 # JARVIS Local LLM — Harness Engineering Architecture
 
-- **상태**: 설계 v3 — v2에 실제 앱 소스(`jarvisSourceFiles/`) 검토 결과 반영
+- **상태**: 설계 v4 — 참조 앱(`local-jarvis`) 검토 반영, v3의 "UI 스냅샷=앱" 오독 교정
 - **작성일**: 2026-09-04
-- **갱신**: 2026-09-04 — `jarvisSourceFiles/` 부분 입수 → §6.4(JS 바인딩)·§11·§12·§13·부록 A·부록 C 갱신
+- **갱신**: 2026-09-04 — `Desktop/AI_WORKSPACE/projects/local-jarvis`를 read-only 참조로 검토 → §6.4·§7·§12·§13·부록 A·C·D 갱신
 - **표기 규칙**: `[사실]` 확인된 사실 · `[제안]` 설계 제안 · `[미결정]` 아직 결정하지 않은 사항
 - **이 문서의 범위**: Harness Engineering 설계만. 이번 단계에서는 runtime 구현·패키지 설치·모델 다운로드·학습을 수행하지 않는다.
 
@@ -278,8 +278,8 @@ class RuntimeAdapter(Protocol):
 
 ### 6.4 JARVIS(JS·Electron) ↔ Harness 바인딩 `[제안]` — v3 추가
 
-앱 소스 검토 결과(부록 C) JARVIS UI는 React(JSX)이며 유일한 native 경계는 `window.jarvisWindow` preload 브리지다.
-이에 따라 Harness(Python)와의 연결은 **renderer → preload 브리지 → Electron main → Harness 로컬 HTTP** 구조를 제안한다.
+v4 교정: 참조 앱(local-jarvis)의 코어는 **Python**(부록 D)이므로 §6.2의 Python 계약을 그대로 사용한다. 아래 JS 바인딩은 `jarvisSourceFiles/`(React UI 프로토타입)를 JARVIS UI로 채택하는 경우에만 필요하다. `[제안]`
+React UI를 쓴다면 유일한 native 경계는 `window.jarvisWindow` preload 브리지이므로, 연결은 **renderer → preload 브리지 → Electron main → Harness 로컬 HTTP** 구조를 제안한다.
 
 ```ts
 // app측 JS 바인딩 (renderer 또는 main) — [제안]
@@ -324,10 +324,11 @@ profile: desktop           # desktop(4070 12GB) / laptop
 
 | 후보 | 종류 | 비고 |
 |---|---|---|
-| Qwen3-8B | base model | 최신 Qwen 계열. 한국어·tool calling 능력 확인 필요 |
-| Qwen2.5-7B-Instruct | base model | 검증 이력이 많음. 초기 평가 추천 후보 `[제안]` |
-| Ollama | runtime | OpenAI-compatible API 내장, 설치·운영 단순. 초기 runtime 추천 `[제안]` |
-| llama.cpp server | runtime | GGUF 직접 실행, 경량. Ollama가 부족할 때 대안 |
+| **Qwen3-8B** | base model | 참조 앱 실사용 모델 `local-jarvis-qwen3:8b`(커스텀 Modelfile) `[사실]` |
+| Qwen3-0.6B | 경량 모델 | 참조 앱의 빠른 점검 모델 `local-jarvis-qwen3:0.6b` `[사실]` |
+| **Ollama** | runtime | 참조 앱의 backend (`config/models.yaml`: `backend: ollama`) `[사실]` |
+| Qwen2.5-7B-Instruct | base model | 대체 후보 — LoRA 데이터셋 규모·평가 후 재검토 `[제안]` |
+| llama.cpp server | runtime | 대체 후보 — Ollama가 부족할 때만 `[제안]` |
 
 > **Soup 관련**: Soup은 이후 LoRA/QLoRA 학습 도구 **후보**이며, 초기 Harness의 필수 runtime으로 결합하지 않는다.
 > 초기 Harness는 기본(파인튜닝 전) 모델만으로 동작해야 한다.
@@ -488,6 +489,7 @@ jarvis-local-llm-harness/          # 논리적 이름 (실제 경로는 FB_Soap_
 | 11 | 개선 입증 시 적용 | gate 통과 시에만 전환 | 10.3 gate 충족, 아니면 base 유지 |
 
 > Soup은 **단계 9부터** 등장한다. 초기 Harness(1–8)는 Soup 없이 동작해야 한다.
+> 참조 앱(local-jarvis, 부록 D) 기준으로 단계 2는 사실상 완료(runtime=Ollama, model=Qwen3-8B)이며, 단계 3–5는 참조 앱 개발 순서 2번 "Ollama wrapper"(현재 Phase 2 TODO)와 같은 작업이다. `[사실]`
 
 ---
 
@@ -502,21 +504,22 @@ jarvis-local-llm-harness/          # 논리적 이름 (실제 경로는 FB_Soap_
 | PII가 로그·데이터셋에 잔류 → 외부 노출 | 개인정보 유출 | PII 필터 + `data/` gitignore + 공개 업로드 금지 |
 | context가 길어지면 latency·비용 증가 | 지연 | context packing 최소화, 요약형 context 우선 |
 | runtime·모델 선택 지연 | 일정 지연 | Ollama + Qwen2.5-7B로 시작하고 후보는 교체 가능으로 유지 |
-| 기존 앱에 LLM/네트워크 호출이 없음 (부록 C) | "교체" 가정이 빗나가 통합 설계 재작업 | 현재 첨부 파일 기준 LLM 호출 0건 `[사실]` — Electron main 미입수로 잔존 가능성만 확인 후 §6.4 계약으로 조정 |
-| v2 이전의 "Python 앱" 가정 vs 실제 React(JSX) | 스택 불일치로 계약·구조 재작업 | §6.4 JS 바인딩으로 이중 계약 유지, Python 여부는 전체 구조 입수 후 확정 `[미결정]` |
+| 참조 앱의 LLM 연동 미완성 (Ollama 호출은 Phase 2 TODO) | 통합 시작 지연 | harness의 Ollama adapter가 참조 앱의 "Ollama wrapper"(개발 순서 2)를 제공 — §12·부록 D `[사실]` |
+| UI 스냅샷(jarvisSourceFiles)을 앱 전체로 오인 | 잘못된 계약 설계 | v4에서 교정: 앱 코어는 Python(local-jarvis), React UI는 별도 프로토타입 `[사실]` (부록 C·D) |
+| 유료 API·cloud fallback 금지(AGENTS) 위반 | 비용·프로젝트 원칙 위반 | harness 기본값을 ollama로 고정, 원격 API는 명시 승인 시에만 노출 `[사실·제안]` |
 
 ### 13.2 미결정 사항
 
 | 항목 | 현재 상태 |
 |---|---|
-| base model 최종 선택 | Qwen3-8B vs Qwen2.5-7B-Instruct `[미결정]` — 초기에는 Qwen2.5-7B 추천 `[제안]` |
-| runtime 최종 선택 | Ollama vs llama.cpp server `[미결정]` — 초기에는 Ollama 추천 `[제안]` |
-| JARVIS 앱 전체 구조 | UI 6개 파일 입수·검토 완료 `[사실]` — Electron main·preload·`useExecutionSession`/`useTaskTree`·`package.json` 미입수 → LLM 채널 최종 확정 `[미결정]` |
+| base model 최종 선택 | 참조 앱에서 Qwen3-8B 사용 중 `[사실]` — LoRA(Soup) 적용 시 재평가, Qwen2.5-7B는 대체 후보 `[미결정]` |
+| runtime 최종 선택 | 참조 앱에서 Ollama 사용 중 `[사실]` — llama.cpp server는 대체 후보 `[제안]` |
+| JARVIS 앱 전체 구조 | 참조 앱(local-jarvis) = Python + Ollama + 음성 비서 `[사실]` — jarvisSourceFiles(React UI)는 별도 프로토타입, 앱과의 관계 `[미결정]` (부록 C·D) |
 | 평가 지표 기준치 | tool accuracy·hallucination 목표 수치 미확정 `[미결정]` |
 | dataset 형식·분리 비율 | OpenAI 메시지 형식, 80/10/10 제안 `[제안]` — 확정 필요 |
 | correction 수집 UI 방식 | 기존 앱에 최소 침습으로 넣는 방법 `[미결정]` |
-| 음성(STT/TTS) 통합 | 범위 제외 유지 — adapter 설계 원칙은 **부록 B** 참고 `[제안]` |
-| 실행 환경 상세 | Windows + WSL2, RTX 4070 12GB, 단일 GPU `[사실]` — Python 버전 등 미확정 |
+| 음성(STT/TTS) 통합 | 참조 앱에 faster-whisper + Windows Heami TTS 구현됨 `[사실]` — Harness 코어와 분리 원칙(부록 B) 유지, harness 연동 시점 `[미결정]` |
+| 실행 환경 상세 | RTX 4070 12GB, 단일 GPU `[사실]` — 참조 앱은 Windows 네이티브(PowerShell·`.venv\Scripts`) 흔적, WSL2 여부·Python 버전 `[미결정]` |
 
 ---
 
@@ -536,11 +539,12 @@ jarvis-local-llm-harness/          # 논리적 이름 (실제 경로는 FB_Soap_
 
 ---
 
-### 부록 A: 이 문서의 검증 상태 (v3)
+### 부록 A: 이 문서의 검증 상태 (v4)
 
-- `[사실]` workspace 구성: `docs/harness-design.md`, `jarvisSourceFiles/`(6개), `motionReferenceSources/`(15개, UI 참조용), `.freebuff/`. git 저장소 아님.
-- `[사실]` `jarvisSourceFiles/`는 React(JSX) UI 6개 — LLM·네트워크 호출 없음, 외부 모듈은 OFFLINE placeholder. 상세는 부록 C.
-- `[미검증]` JARVIS 앱 전체(Electron main·preload·hooks·빌드 설정)와 지표 목표치 — 미입수/실측 필요.
+- `[사실]` workspace: git 저장소 초기화 완료(root commit `dcbd1c7`) — `docs/harness-design.md`, `jarvisSourceFiles/`(6), `.gitignore` 커밋됨. git author는 placeholder(추후 amend).
+- `[사실]` 참조 앱: `Desktop/AI_WORKSPACE/projects/local-jarvis` (read-only 지정, 수정 금지) — Python + Ollama + 음성. 상세는 부록 D.
+- `[사실]` `jarvisSourceFiles/`는 React(JSX) UI 프로토타입 6개 — LLM·네트워크 호출 없음, OFFLINE placeholder. 참조 앱과의 관계 `[미결정]` (부록 C).
+- `[미검증]` 지표 목표치(latency·tool accuracy 등) — 실측 전까지 미확정.
 
 ### 부록 B: 음성(STT/TTS) 확장 설계 원칙 — 추후 적용
 
@@ -564,15 +568,29 @@ class TTSAdapter(Protocol):
 - **구현 후보**(추후 검토, 미결정): faster-whisper(STT), edge-tts / Piper(TTS).
 - 상태: 이번 Harness 범위(§1.3)에서는 제외 유지. Slice 0~11 완료 후 이 부록을 기반으로 별도 설계 확정.
 
-### 부록 C: jarvisSourceFiles 검토 결과 (2026-09-04)
+### 부록 C: jarvisSourceFiles(React UI) 검토 결과 (2026-09-04, v4 교정 포함)
 
 `jarvisSourceFiles/`에 첨부된 6개 파일(`App.jsx`, `main.jsx`, `CommandCenter.jsx`, `QuickPip.jsx`, `TreePrototype.jsx`, `App.css`) 검토 결과.
 
-- `[사실]` **스택**: React 18 + Vite + Electron 전제의 JSX UI. anime.js(`CommandCenter`), `motion/react`, lucide-react 사용. Python 코드 없음 — v2 이전의 "Python 앱" 가정과 상충하므로 전체 구조 입수 시 재확인 필요.
+- `[사실]` **스택**: React 18 + Vite + Electron 전제의 JSX UI. anime.js(`CommandCenter`), `motion/react`, lucide-react 사용.
+- `[사실·v4 교정]` 이 파일들은 **UI 프로토타입**이다. 참조 앱(local-jarvis)의 코어는 Python으로 별개이며, v3는 이 스냅샷을 "앱 전체"로 오독했고 v4에서 교정. 두 저장소의 관계(교체·병행·분리)는 `[미결정]`.
 - `[사실]` **LLM·네트워크 호출 없음**: fetch/axios/OpenAI 등 호출 코드 0건. CommandCenter의 WEATHER/CALENDAR/NEWS는 하드코딩 `OFFLINE` placeholder.
 - `[사실]` **화면 구조**: SYSTEM surface(`TreePrototype`) = Goal→Project→Task 트리(3D carousel·breadcrumb·pin), EXECUTION surface(`CommandCenter`/`QuickPip`) = Objective/Next Action/Timer/Checklist.
 - `[사실]` **유일한 native 경계**: `window.jarvisWindow` preload 브리지. 구현(Electron main)은 미첨부 → LLM 관련 코드가 main에 있을 가능성은 완전 배제하지 않음.
 - `[사실]` **persistence**: pinned shortcuts는 `localStorage`(`jarvis_tree_pinned_shortcuts_v1`). `useExecutionSession`/`useTaskTree` hook 미첨부로 Objective·Task 저장 방식 미확인.
 - `[제안]` **8.1 tool 4개 ↔ 기존 state 매핑**: `get_project_context`/`list_current_tasks`/`create_task`는 `useTaskTree`·`useExecutionSession`(또는 그 뒤 저장소) 대상, `propose_next_action`은 JARVIS 내부 로직 대상.
 - `[제안]` **LLM 채널**: renderer가 localhost LLM에 직접 fetch하면 CORS·origin 문제와 엔드포인트 노출이 생기므로, 기존 `window.jarvisWindow` 패턴대로 **Electron main이 harness를 호출**하는 구조가 적합(§6.4).
-- `[미결정]` Electron main·preload·`useExecutionSession`·`useTaskTree`·`SevenSegmentTime`·`index.css`·`package.json` 미첨부 → M0에서 입수 필요.
+- `[미결정]` Electron main·preload·`useExecutionSession`·`useTaskTree`·`SevenSegmentTime`·`index.css`·`package.json` 미첨부 — React UI를 채택할 경우 M0에서 입수 필요. Python 앱(local-jarvis) 경로만 쓰면 불필요.
+
+### 부록 D: 참조 앱 local-jarvis 검토 결과 (v4, 2026-09-04)
+
+위치: `Desktop/AI_WORKSPACE/projects/local-jarvis` — 사용자 확인으로 **read-only 참조**. 이 문서는 그 폴더를 수정하지 않는다.
+
+- `[사실]` **정체**: Python-first 개인 AI 비서 실험(Phase 1 골격 + 로컬 Ollama 환경). React UI 없음 — `tools/*.py`, `config/*.yaml`, `prompts/*.md`, `memory/*.md`, `data/`, `logs/`, `tests/` 구조.
+- `[사실]` **모델/runtime**: `config/models.yaml` — backend `ollama`, `local-jarvis-qwen3:8b`(bulk/refinement/planning), `local-jarvis-qwen3:0.6b`(fast), RTX 4070 12GB, 2026-06-13 검증. `models/`에 커스텀 Modelfile 2개.
+- `[사실]` **LLM 연동 상태**: README 기준 "실제 Ollama 연동은 Phase 2 TODO". AGENTS 개발 순서 2번 "Ollama wrapper" = harness의 **Runtime Adapter(§7)**가 제공할 기능 — 자연스러운 통합점.
+- `[사실]` **음성**: `docs/VOICE_ASSISTANT.md` — 마이크 → faster-whisper → Ollama Qwen3 8B → Windows Microsoft Heami(TTS) → 스피커. v1 경계: push-to-talk, 대화·초안만(파일 변경·컴퓨터 제어·업로드·결제 금지), 오디오는 전사 후 삭제. Realtek 마이크 미노출 이슈 메모 있음.
+- `[사실]` **규칙(AGENTS.md)**: Ollama 기본·유료 API 0회 지향, 패키지 설치·대량 이동·삭제·게시·결제·외부 서비스 전 승인, 영구 삭제 금지(`archives/`), dry-run·로그 우선(`logs/runs.log`·`errors.log`), 백엔드 교체 가능 유지, OpenAI/Anthropic fallback 금지.
+- `[사실]` **운영 규칙(JARVIS_RULES.md)**: 읽기·초안 = 안전 작업, 이동·삭제·게시·결제·외부 전송 = 승인 작업, 로그 유지 — harness의 **Permission Gate(§8)**와 일치.
+- `[제안]` **통합 경로**: 참조 앱 Phase 2(Ollama wrapper) = harness Slice 0~1. `tools/common.py`·`cost_tracker.py`·`safe_runner.py`가 trace·비용·안전 실행의 기반이 될 수 있음 — 코드 읽기는 M1에서.
+- `[미결정]` 참조 앱과 jarvisSourceFiles(React UI)의 관계, JARVIS "Command Center"(Goal→Project→Task) 흐름이 참조 앱에 존재하는지, LoRA/Soup 적용 대상 모델(Qwen3-8B).
