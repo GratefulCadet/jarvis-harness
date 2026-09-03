@@ -1,0 +1,7746 @@
+.jarvis-shell {
+  position: relative;
+
+  width: 100vw;
+  height: 100vh;
+
+  display: flex;
+  align-items: center;
+  justify-content: center;
+
+  overflow: hidden;
+
+  background: transparent;
+
+  -webkit-app-region: no-drag;
+
+  --pip-offset-x: 0px;
+  --pip-offset-y: 0px;
+
+  /*
+    Legacy cyan palette archive.
+    현재의 파란 JARVIS 색 정보를 버리지 않고 source-of-truth로 남긴다.
+    Command Center v2의 기본 UI는 monochrome이지만,
+    이후 accent theme으로 언제든 다시 연결할 수 있다.
+  */
+  --jarvis-legacy-bg-glow-strong: rgba(24, 72, 96, 0.30);
+  --jarvis-legacy-bg-glow-soft: rgba(11, 34, 48, 0.18);
+  --jarvis-legacy-accent: rgb(126, 219, 255);
+  --jarvis-legacy-accent-soft: rgba(126, 219, 255, 0.13);
+  --jarvis-legacy-border: rgba(141, 220, 255, 0.13);
+  --jarvis-legacy-border-strong: rgba(141, 220, 255, 0.35);
+  --jarvis-legacy-text: rgba(232, 249, 255, 0.94);
+}
+
+/* ==================================================
+   Command Center background
+   ================================================== */
+
+/*
+  실제 배경 레이어.
+
+  radial glow는 반투명이지만
+  그 밑에 #030507 solid layer가 있으므로
+  Command Center 내부는 절대 투명하지 않는다.
+*/
+.jarvis-shell::before {
+  content: "";
+
+  position: absolute;
+  inset: 0;
+
+  z-index: 0;
+
+  pointer-events: none;
+
+  background:
+    radial-gradient(
+      circle at center,
+      rgba(255, 255, 255, 0.050) 0%,
+      rgba(255, 255, 255, 0.018) 34%,
+      rgba(255, 255, 255, 0) 70%
+    ),
+    #050505;
+
+  opacity: 0;
+
+  clip-path:
+    circle(
+      105px at 50% 50%
+    );
+
+  will-change:
+    clip-path,
+    opacity;
+}
+
+/*
+  Command Center 최종 상태.
+
+  150vmax는 workArea 전체를
+  충분히 덮는다.
+*/
+.command-center-mode::before {
+  opacity: 1;
+
+  clip-path:
+    circle(
+      150vmax at 50% 50%
+    );
+}
+
+/*
+  일반 PiP에서는
+  배경이 완전히 투명하다.
+*/
+.pip-mode::before {
+  opacity: 0;
+
+  clip-path:
+    circle(
+      105px at 50% 50%
+    );
+}
+
+/* ==================================================
+   Core
+   ================================================== */
+
+.core-container {
+  position: relative;
+  z-index: 1;
+
+  display: grid;
+  place-items: center;
+
+  transform-origin:
+    center center;
+
+  will-change: transform;
+}
+
+/* ==================================================
+   Core shell + orbital presence
+   ================================================== */
+
+
+/* --------------------------------------------------
+   Outer translucent shell
+   -------------------------------------------------- */
+
+.core-outer-ring {
+  position: relative;
+
+  width: 240px;
+  height: 240px;
+
+  display: flex;
+  align-items: center;
+  justify-content: center;
+
+  border: 0;
+  border-radius: 50%;
+
+  box-shadow: none;
+
+  overflow: visible;
+
+  isolation: isolate;
+}
+
+
+/*
+  가장 바깥쪽의 희미한 spherical shell.
+
+  실제 3D sphere는 아니지만
+  edge + 내부 highlight + glow를 겹쳐
+  투명한 구형 외피처럼 보이게 한다.
+*/
+.core-outer-ring::before {
+  content: '';
+
+  position: absolute;
+
+  inset: -3px;
+
+  border:
+    1px solid
+    rgba(
+      126,
+      219,
+      255,
+      0.20
+    );
+
+  border-radius: 50%;
+
+  background:
+    radial-gradient(
+      circle at 36% 28%,
+      rgba(185, 239, 255, 0.055) 0%,
+      rgba(79, 195, 247, 0.018) 34%,
+      rgba(79, 195, 247, 0) 68%
+    );
+
+  box-shadow:
+    inset 7px 5px 18px
+      rgba(150, 230, 255, 0.025),
+    inset -7px -8px 20px
+      rgba(18, 96, 130, 0.025),
+    0 0 16px
+      rgba(61, 181, 235, 0.025);
+
+  pointer-events: none;
+
+  z-index: -2;
+}
+
+.core-outer-ring::after {
+  content: '';
+
+  position: absolute;
+  inset: -5px;
+
+  border-radius: 50%;
+
+  background:
+    conic-gradient(
+      from 0deg,
+      rgba(255, 255, 255, 0),
+      rgba(255, 255, 255, 0),
+      rgba(255, 255, 255, 0.88),
+      rgba(126, 219, 255, 0.44),
+      rgba(255, 255, 255, 0)
+    );
+
+  opacity: 0.42;
+
+  mask:
+    radial-gradient(
+      farthest-side,
+      transparent calc(100% - 2px),
+      black calc(100% - 1px)
+    );
+
+  filter:
+    drop-shadow(
+      0 0 8px
+      rgba(
+        255,
+        255,
+        255,
+        0.30
+      )
+    );
+
+  animation:
+    core-border-trail
+    5.8s
+    linear
+    infinite;
+
+  pointer-events: none;
+
+  z-index: -1;
+}
+
+@keyframes core-border-trail {
+  to {
+    rotate: 360deg;
+  }
+}
+
+/* --------------------------------------------------
+   Structural middle ring
+   -------------------------------------------------- */
+
+.core-middle-ring {
+  position: relative;
+  z-index: 2;
+
+  width: 164px;
+  height: 164px;
+
+  display: flex;
+  align-items: center;
+  justify-content: center;
+
+  /*
+    레이아웃과 drag geometry는 유지하지만
+    정적인 middle circle은 보이지 않는다.
+  */
+  border: 1px solid transparent;
+  border-radius: 50%;
+
+  box-shadow: none;
+}
+
+
+/* --------------------------------------------------
+   Orbit layer
+   -------------------------------------------------- */
+
+.core-orbit-layer {
+  position: absolute;
+
+  left: 50%;
+  top: 50%;
+
+  width: 240px;
+  height: 240px;
+
+  transform:
+    translate3d(
+      -50%,
+      -50%,
+      0
+    );
+
+  transform-style: preserve-3d;
+  perspective: 700px;
+
+  pointer-events: none;
+  user-select: none;
+
+  z-index: 1;
+}
+
+
+/* --------------------------------------------------
+   Shared orbit appearance
+   -------------------------------------------------- */
+
+.core-orbit {
+  position: absolute;
+
+  left: 50%;
+  top: 50%;
+
+  border:
+    1px solid
+    rgba(
+      65,
+      186,
+      232,
+      0.72
+    );
+
+  border-radius: 50%;
+
+  /*
+    1px geometry 자체는 유지.
+
+    두께를 2px로 늘리는 대신
+    아주 좁은 luminous halo를 겹쳐
+    선명도를 높인다.
+  */
+  box-shadow:
+    0 0 1px
+      rgba(
+        170,
+        235,
+        255,
+        0.46
+      ),
+    0 0 3px
+      rgba(
+        72,
+        192,
+        238,
+        0.22
+      ),
+    0 0 8px
+      rgba(
+        72,
+        192,
+        238,
+        0.07
+      );
+
+  transform-origin: center center;
+  transform-style: preserve-3d;
+
+  backface-visibility: visible;
+
+  pointer-events: none;
+
+  will-change: transform;
+}
+
+
+/* --------------------------------------------------
+   Outer orbit
+   -------------------------------------------------- */
+
+.core-orbit-a {
+  width: 236px;
+  height: 236px;
+
+  margin-left: -118px;
+  margin-top: -118px;
+
+  animation:
+    jarvis-orbit-a
+    32s
+    linear
+    infinite;
+}
+
+/*
+  PiP outer orbit border trail.
+  기존 orbit geometry와 회전은 그대로 두고,
+  orbit A의 둘레에 짧은 luminous segment만 추가한다.
+*/
+.pip-mode
+.core-orbit-a::after {
+  content: '';
+
+  position: absolute;
+  inset: -2px;
+
+  border-radius: 50%;
+
+  background:
+    conic-gradient(
+      from 0deg,
+      transparent 0deg,
+      transparent 292deg,
+      rgba(
+        255,
+        255,
+        255,
+        0.08
+      ) 312deg,
+      rgba(
+        255,
+        255,
+        255,
+        0.95
+      ) 336deg,
+      rgba(
+        255,
+        255,
+        255,
+        0.12
+      ) 352deg,
+      transparent 360deg
+    );
+
+  -webkit-mask:
+    radial-gradient(
+      farthest-side,
+      transparent calc(100% - 2px),
+      #000 calc(100% - 1px)
+    );
+
+  mask:
+    radial-gradient(
+      farthest-side,
+      transparent calc(100% - 2px),
+      #000 calc(100% - 1px)
+    );
+
+  opacity: 0.68;
+
+  filter:
+    drop-shadow(
+      0 0 3px
+      rgba(
+        255,
+        255,
+        255,
+        0.72
+      )
+    )
+    drop-shadow(
+      0 0 8px
+      rgba(
+        255,
+        255,
+        255,
+        0.28
+      )
+    );
+
+  transform-origin:
+    center center;
+
+  animation:
+    pip-outer-orbit-trail
+    6.2s
+    linear
+    infinite;
+
+  pointer-events: none;
+}
+
+@keyframes pip-outer-orbit-trail {
+  from {
+    rotate: 0deg;
+  }
+
+  to {
+    rotate: 360deg;
+  }
+}
+
+.core-orbit-c {
+  width: 236px;
+  height: 236px;
+
+  margin-left: -118px;
+  margin-top: -118px;
+
+  opacity: 0.82;
+
+  animation:
+    jarvis-orbit-c
+    38s
+    linear
+    infinite;
+}
+
+/* --------------------------------------------------
+   Inner orbit
+   Existing middle-ring size
+   -------------------------------------------------- */
+
+.core-orbit-b {
+  width: 164px;
+  height: 164px;
+
+  margin-left: -82px;
+  margin-top: -82px;
+
+  border-color:
+    rgba(59, 156, 191, 0.483);
+
+  box-shadow:
+    0 0 1px
+      rgba(
+        184,
+        240,
+        255,
+        0.52
+      ),
+    0 0 3px
+      rgba(
+        78,
+        199,
+        243,
+        0.25
+      ),
+    0 0 7px
+      rgba(
+        78,
+        199,
+        243,
+        0.08
+      );
+
+  animation:
+    jarvis-orbit-b
+    20s
+    linear
+    infinite;
+}
+
+.core-orbit-d {
+  width: 164px;
+  height: 164px;
+
+  margin-left: -82px;
+  margin-top: -82px;
+
+  opacity: 0.76;
+
+  border-color:
+    rgba(78, 199, 243, 0.501);
+
+  animation:
+    jarvis-orbit-d
+    46s
+    linear
+    infinite;
+}
+
+/* --------------------------------------------------
+   Outer orbital motion
+   -------------------------------------------------- */
+
+@keyframes jarvis-orbit-a {
+  0% {
+    transform:
+      rotateZ(15deg)
+      rotateX(67deg)
+      rotateY(0deg);
+  }
+
+  100% {
+    transform:
+      rotateZ(15deg)
+      rotateX(67deg)
+      rotateY(360deg);
+  }
+}
+
+
+/* --------------------------------------------------
+   Inner orbital motion
+   -------------------------------------------------- */
+
+@keyframes jarvis-orbit-b {
+  0% {
+    transform:
+      rotateZ(66deg)
+      rotateY(64deg)
+      rotateX(0deg);
+  }
+
+  100% {
+    transform:
+      rotateZ(66deg)
+      rotateY(64deg)
+      rotateX(-360deg);
+  }
+}
+
+@keyframes jarvis-orbit-c {
+  0% {
+    transform:
+      rotateZ(78deg)
+      rotateY(63deg)
+      rotateX(0deg);
+  }
+
+  100% {
+    transform:
+      rotateZ(78deg)
+      rotateY(63deg)
+      rotateX(360deg);
+  }
+}
+
+@keyframes jarvis-orbit-d {
+  0% {
+    transform:
+      rotateZ(-24deg)
+      rotateX(61deg)
+      rotateY(0deg);
+  }
+
+  100% {
+    transform:
+      rotateZ(-24deg)
+      rotateX(61deg)
+      rotateY(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .core-orbit {
+    animation: none;
+  }
+}
+
+.core-trigger {
+  appearance: none;
+
+  width: 96px;
+  height: 96px;
+
+  display: flex;
+  align-items: center;
+  justify-content: center;
+
+  margin: 0;
+  padding: 0;
+
+  border: 0;
+  border-radius: 50%;
+
+  background: transparent;
+
+  cursor: pointer;
+
+  -webkit-app-region: no-drag;
+}
+
+.core-trigger:focus-visible {
+  outline:
+    1px solid
+    rgba(
+      126,
+      219,
+      255,
+      0.8
+    );
+
+  outline-offset: 4px;
+}
+
+.core-energy {
+  width: 78px;
+  height: 78px;
+
+  border-radius: 50%;
+
+  background:
+    radial-gradient(
+      circle,
+      rgba(237, 252, 255, 1) 0%,
+      rgba(115, 221, 255, 0.96) 25%,
+      rgba(33, 151, 205, 0.68) 55%,
+      rgba(33, 151, 205, 0.22) 76%,
+      rgba(33, 151, 205, 0) 100%
+    );
+
+  box-shadow:
+    0 0 50px
+      rgba(
+        108,
+        218,
+        255,
+        0.72
+      ),
+    0 0 65px
+      rgba(
+        52,
+        172,
+        225,
+        0.38
+      ),
+    0 0 65px
+      rgba(
+        40,
+        145,
+        195,
+        0.15
+      );
+
+  animation:
+    core-idle
+    4s
+    ease-in-out
+    infinite;
+}
+
+@keyframes core-idle {
+  0%,
+  100% {
+    transform:
+      scale(0.97);
+
+    opacity: 0.84;
+  }
+
+  50% {
+    transform:
+      scale(1.03);
+
+    opacity: 1;
+  }
+}
+
+/* ==================================================
+   JARVIS label
+   ================================================== */
+
+.core-label {
+  position: absolute;
+
+  top:
+    calc(
+      100% + 24px
+    );
+
+  left: 50%;
+
+  margin: 0;
+
+  padding-left: 0.45em;
+
+  transform:
+    translateX(-50%);
+
+  white-space: nowrap;
+
+  color:
+    rgba(
+      174,
+      226,
+      247,
+      0.52
+    );
+
+  font-size: 11px;
+  font-weight: 400;
+
+  letter-spacing: 0.45em;
+}
+
+/* ==================================================
+   PiP
+   ================================================== */
+
+/*
+  Command Center 기준 Core = 240px
+
+  PiP에서는
+  전체 객체를 0.75배 하므로
+  외곽 Core = 180px.
+*/
+.pip-mode .core-container {
+  transform:
+    translate3d(
+      0,
+      0,
+      0
+    )
+    scale(0.75);
+}
+
+/*
+  PiP 외곽 링은
+  Window drag 영역.
+*/
+.pip-mode
+.core-outer-ring,
+.pip-mode
+.core-middle-ring {
+  -webkit-app-region: drag;
+
+  user-select: none;
+}
+
+
+/* ==================================================
+   Command Center idle
+   ================================================== */
+
+.command-center-mode
+.core-container {
+  transform:
+    translate3d(
+      0,
+      0,
+      0
+    )
+    scale(1);
+}
+
+/* ==================================================
+   OPEN
+   PiP → Command Center
+   ================================================== */
+
+/*
+  아직 Native Window가 PiP일 때.
+
+  Core는 현재 위치 그대로.
+*/
+.pip-mode.opening-start
+.core-container {
+  transform:
+    translate3d(
+      0,
+      0,
+      0
+    )
+    scale(0.75);
+
+  transition: none;
+}
+
+/*
+  Native Window가 workArea로
+  확대된 순간부터 적용.
+
+  workArea의 중앙을 기준으로
+  기존 PiP 위치까지 역이동해서
+  화면상 Core 위치를 그대로 유지한다.
+*/
+@media (min-width: 501px) {
+  .pip-mode.opening-start
+  .core-container {
+    transform:
+      translate3d(
+        var(--pip-offset-x),
+        var(--pip-offset-y),
+        0
+      )
+      scale(0.75);
+
+    transition: none;
+  }
+
+  /*
+    확대된 첫 프레임에서
+    검은 배경도 기존 PiP 위치의
+    작은 원으로 시작한다.
+  */
+  .pip-mode.opening-start::before {
+    opacity: 1;
+
+    clip-path:
+      circle(
+        105px
+        at
+        calc(
+          50% +
+          var(--pip-offset-x)
+        )
+        calc(
+          50% +
+          var(--pip-offset-y)
+        )
+      );
+
+    transition: none;
+  }
+}
+
+/*
+  실제 opening motion.
+
+  Native Window는 이미 고정.
+
+  GPU transform으로:
+  PiP 위치 → 중앙
+  0.75 → 1
+*/
+.pip-mode.opening
+.core-container {
+  transform:
+    translate3d(
+      0,
+      0,
+      0
+    )
+    scale(1);
+
+  transition:
+    transform
+    750ms
+    cubic-bezier(
+      0.22,
+      1,
+      0.36,
+      1
+    );
+}
+
+/*
+  같은 시간 동안
+  배경 원도 PiP에서
+  Command Center 전체로 확장.
+*/
+.pip-mode.opening::before {
+  opacity: 1;
+
+  clip-path:
+    circle(
+      150vmax
+      at
+      50%
+      50%
+    );
+
+  transition:
+    clip-path
+      2300ms
+      cubic-bezier(
+        0.22,
+        1,
+        0.36,
+        1
+      ),
+    opacity
+      120ms
+      ease-out;
+}
+
+/* ==================================================
+   CLOSE STEP 1
+   전체 배경 → 중앙 원 응축
+   ================================================== */
+
+.command-center-mode
+.closing-prep {
+  pointer-events: none;
+}
+
+.command-center-mode.closing-prep
+.core-container {
+  transform:
+    translate3d(
+      0,
+      0,
+      0
+    )
+    scale(1);
+
+  transition: none;
+}
+
+/*
+  기존에 마음에 들었던
+  240ms 원형 응축.
+*/
+.command-center-mode.closing-prep::before {
+  opacity: 1;
+
+  clip-path:
+    circle(
+      300px
+      at
+      50%
+      50%
+    );
+
+  transition:
+    clip-path
+      240ms
+      cubic-bezier(
+        0.22,
+        1,
+        0.36,
+        1
+      );
+}
+
+/* ==================================================
+   CLOSE STEP 2
+   중앙 → 실제 PiP 위치
+   ================================================== */
+
+.command-center-mode.closing-moving
+.core-container {
+  transform:
+    translate3d(
+      var(--pip-offset-x),
+      var(--pip-offset-y),
+      0
+    )
+    scale(0.75);
+
+  transition:
+    transform
+      420ms
+      cubic-bezier(
+        0.22,
+        1,
+        0.36,
+        1
+      );
+}
+
+.command-center-mode.closing-moving::before {
+  opacity: 1;
+
+  clip-path:
+    circle(
+      105px
+      at
+      calc(
+        50% +
+        var(--pip-offset-x)
+      )
+      calc(
+        50% +
+        var(--pip-offset-y)
+      )
+    );
+
+  transition:
+    clip-path
+      420ms
+      cubic-bezier(
+        0.22,
+        1,
+        0.36,
+        1
+      );
+}
+
+/* ==================================================
+   CLOSE STEP 3
+   Native bounds swap 직전
+   ================================================== */
+
+.command-center-mode.closing-swap
+.core-container {
+  transform:
+    translate3d(
+      var(--pip-offset-x),
+      var(--pip-offset-y),
+      0
+    )
+    scale(0.75);
+
+  transition: none;
+}
+
+.command-center-mode.closing-swap::before {
+  opacity: 1;
+
+  clip-path:
+    circle(
+      105px
+      at
+      calc(
+        50% +
+        var(--pip-offset-x)
+      )
+      calc(
+        50% +
+        var(--pip-offset-y)
+      )
+    );
+
+  transition: none;
+}
+
+/*
+  Native Window가 280×280으로
+  교체된 직후.
+
+  viewport 중심 자체가 이제
+  실제 PiP 화면 위치이므로
+  translate가 더 이상 필요 없다.
+*/
+@media (max-width: 500px) {
+  .command-center-mode.closing-swap
+  .core-container {
+    transform:
+      translate3d(
+        0,
+        0,
+        0
+      )
+      scale(0.75);
+  }
+
+  .command-center-mode.closing-swap::before {
+    opacity: 1;
+
+    clip-path:
+      circle(
+        105px
+        at
+        50%
+        50%
+      );
+  }
+}
+
+/*
+  React state가 PiP로 변경된 뒤에도
+  같은 화면 상태를 한 프레임 유지.
+*/
+.pip-mode.closing-swap
+.core-container {
+  transform:
+    translate3d(
+      0,
+      0,
+      0
+    )
+    scale(0.75);
+
+  transition: none;
+}
+
+.pip-mode.closing-swap::before {
+  opacity: 1;
+
+  clip-path:
+    circle(
+      105px
+      at
+      50%
+      50%
+    );
+
+  transition: none;
+}
+
+/* ==================================================
+   CLOSE STEP 4
+   PiP background fade
+   ================================================== */
+
+.pip-mode.pip-fade
+.core-container {
+  transform:
+    translate3d(
+      0,
+      0,
+      0
+    )
+    scale(0.75);
+}
+
+.pip-mode.pip-fade::before {
+  opacity: 0;
+
+  clip-path:
+    circle(
+      105px
+      at
+      50%
+      50%
+    );
+
+  transition:
+    opacity
+      160ms
+      ease-out;
+}
+
+/* ==================================================
+   Interaction zone
+
+   Core와 Hover UI를 하나의 영역으로 묶는다.
+   Core → Timer로 마우스를 이동해도 hover가 유지된다.
+   ================================================== */
+
+.pip-interaction-zone {
+  position: relative;
+
+  width: 260px;
+  height: 260px;
+
+  display: grid;
+  place-items: center;
+
+  z-index: 4;
+}
+
+/* ==================================================
+   Quick PiP hover layer
+   ================================================== */
+
+.quick-pip {
+  position: absolute;
+  inset: 0;
+
+  z-index: 5;
+
+  color:
+    rgba(
+      190,
+      232,
+      248,
+      0.82
+    );
+
+  pointer-events: none;
+}
+
+/*
+  Quick PiP의 정보 요소는 기본적으로 숨긴다.
+
+  단, Timer가 active/paused이면
+  7-segment Timer만 Ambient 상태에서도
+  계속 보이게 한다.
+*/
+.quick-pip-next-action,
+.quick-pip-current-step,
+.quick-pip-timer {
+  opacity: 0;
+  visibility: hidden;
+
+  transform:
+    translateY(3px)
+    scale(0.985);
+
+  transition:
+    opacity 140ms ease-out,
+    transform 180ms
+      cubic-bezier(
+        0.22,
+        1,
+        0.36,
+        1
+      ),
+    visibility 140ms;
+}
+
+/*
+  Core 주변 interaction zone에 hover하거나,
+  내부 control이 focus된 경우
+  Next Action + Timer + Current Step을 모두 표시.
+*/
+.quick-pip-enabled
+.pip-interaction-zone:hover
+.quick-pip-next-action,
+.quick-pip-enabled
+.pip-interaction-zone:hover
+.quick-pip-timer,
+.quick-pip-enabled
+.pip-interaction-zone:hover
+.quick-pip-current-step,
+.quick-pip-enabled
+.pip-interaction-zone:focus-within
+.quick-pip-next-action,
+.quick-pip-enabled
+.pip-interaction-zone:focus-within
+.quick-pip-timer,
+.quick-pip-enabled
+.pip-interaction-zone:focus-within
+.quick-pip-current-step {
+  opacity: 1;
+  visibility: visible;
+
+  transform:
+    translateY(0)
+    scale(1);
+}
+
+/* --------------------------------------------------
+   Hover Next Action
+   -------------------------------------------------- */
+
+.quick-pip-next-action {
+  position: absolute;
+
+  top: -10px;
+  left: 50%;
+
+  width: 220px;
+
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+
+  gap: 2px;
+
+  transform:
+    translateX(-50%)
+    translateY(3px)
+    scale(0.985);
+
+  text-align: center;
+
+  pointer-events: none;
+  user-select: none;
+}
+
+.quick-pip-enabled
+.pip-interaction-zone:hover
+.quick-pip-next-action,
+.quick-pip-enabled
+.pip-interaction-zone:focus-within
+.quick-pip-next-action {
+  transform:
+    translateX(-50%)
+    translateY(0)
+    scale(1);
+}
+
+.quick-pip-kicker {
+  color:
+    rgb(126, 218, 255);
+
+  font-size: 8.5px;
+  font-weight: 500;
+
+  letter-spacing: 0.24em;
+
+  text-shadow:
+    0 1px 1px
+      rgba(
+        0,
+        6,
+        10,
+        0.94
+      ),
+    0 0 2px
+      rgba(
+        0,
+        6,
+        10,
+        0.2
+      );
+}
+
+.quick-pip-action-text {
+  max-width: 220px;
+
+  overflow: hidden;
+
+  color:
+    rgba(
+      218,
+      245,
+      253,
+      0.92
+    );
+
+  font-size: 18px;
+  font-weight: 400;
+  line-height: 1.2;
+
+  text-overflow: ellipsis;
+  white-space: normal;
+
+  text-shadow:
+    0 1.5px 1.5px
+      rgba(
+        0,
+        6,
+        10,
+        0.96
+      ),
+    0 0 1px
+      rgba(
+        0,
+        6,
+        10,
+        0.96
+      );
+}
+
+.quick-pip-action-text.is-complete {
+  color:
+    rgba(
+      166,
+      222,
+      239,
+      0.48
+    );
+
+  text-decoration:
+    line-through;
+}
+
+/* --------------------------------------------------
+   7-segment Timer
+   -------------------------------------------------- */
+
+.quick-pip-timer {
+  position: absolute;
+
+  /*
+    Core 중심보다 아래,
+    현재 checklist 바로 위에 배치한다.
+
+    Core 자체를 움직이는 것이 아니라
+    Quick PiP 정보층만 이동한다.
+  */
+  left: 50%;
+  bottom: 30px;
+
+  width: 190px;
+
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+
+  gap: 4px;
+
+  box-sizing: border-box;
+
+  /*
+    기존의 독립적인 card 느낌을 제거한다.
+  */
+  padding: 0;
+
+  border: 0;
+  border-radius: 0;
+
+  background: transparent;
+
+  box-shadow: none;
+
+  backdrop-filter: none;
+
+  pointer-events: auto;
+
+  /*
+    공통 hover animation의
+    translateY와 함께 중앙 정렬을 유지한다.
+  */
+  transform:
+    translateX(-50%)
+    translateY(3px)
+    scale(0.985);
+
+  -webkit-app-region: no-drag;
+}
+
+
+.quick-pip-enabled
+.pip-interaction-zone:hover
+.quick-pip-timer,
+.quick-pip-enabled
+.pip-interaction-zone:focus-within
+.quick-pip-timer {
+  transform:
+    translateX(-50%)
+    translateY(0)
+    scale(1);
+}
+
+.quick-pip.is-paused
+.quick-pip-timer {
+  opacity: 0.62;
+}
+
+.quick-pip-timer-head {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+
+  gap: 8px;
+
+  color:
+    rgba(
+      155,
+      230,
+      255,
+      0.68
+    );
+
+  font-size: 6px;
+  font-weight: 500;
+
+  letter-spacing: 0.14em;
+
+  text-shadow:
+    0 1px 2px
+      rgba(
+        0,
+        5,
+        8,
+        0.92
+      );
+
+  user-select: none;
+}
+
+.quick-pip-text-loop {
+  width: 218px;
+  min-height: 18px;
+
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+
+  margin-bottom: 3px;
+
+  overflow: hidden;
+}
+
+.quick-pip-text-loop-label {
+  color:
+    rgba(
+      255,
+      255,
+      255,
+      0.40
+    );
+
+  font-size: 7px;
+  font-weight: 750;
+  letter-spacing: 0.12em;
+}
+
+.quick-pip-text-loop-value {
+  position: relative;
+
+  max-width: 142px;
+
+  overflow: hidden;
+
+  color:
+    rgba(
+      255,
+      255,
+      255,
+      0.84
+    );
+
+  font-size: 8px;
+  font-weight: 520;
+  line-height: 1.2;
+
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.quick-pip-text-loop-value::after {
+  content: '';
+
+  position: absolute;
+  inset: 0;
+
+  background:
+    linear-gradient(
+      110deg,
+      transparent,
+      rgba(
+        255,
+        255,
+        255,
+        0.40
+      ),
+      transparent
+    );
+
+  opacity: 0.42;
+
+  transform:
+    translateX(-120%);
+
+  animation:
+    quick-pip-text-shimmer
+    2.6s
+    ease-in-out
+    infinite;
+
+  pointer-events: none;
+}
+
+@keyframes quick-pip-text-shimmer {
+  55%,
+  100% {
+    transform:
+      translateX(120%);
+  }
+}
+
+.seven-segment-time {
+  display: flex;
+  align-items: center;
+
+  gap: 3.6px;
+
+  height: 38.4px;
+
+  filter:
+    drop-shadow(
+      0 0 4px
+      rgba(
+        82,
+        203,
+        246,
+        0.28
+      )
+    );
+
+  user-select: none;
+}
+
+.sliding-number-time {
+  gap: 4px;
+
+  filter:
+    drop-shadow(
+      0 0 9px
+      rgba(
+        255,
+        255,
+        255,
+        0.18
+      )
+    );
+}
+
+.seven-segment-digit {
+  position: relative;
+
+  width: 19.2px;
+  height: 36px;
+
+  display: inline-block;
+}
+
+.sliding-number-digit {
+  width: 22px;
+  height: 38px;
+
+  display: inline-grid;
+  place-items: center;
+
+  overflow: hidden;
+
+  border:
+    1px solid
+    rgba(
+      255,
+      255,
+      255,
+      0.18
+    );
+
+  border-radius: 7px;
+
+  background:
+    linear-gradient(
+      180deg,
+      rgba(
+        255,
+        255,
+        255,
+        0.16
+      ),
+      rgba(
+        255,
+        255,
+        255,
+        0.045
+      )
+    );
+
+  box-shadow:
+    inset 0 1px 0
+      rgba(
+        255,
+        255,
+        255,
+        0.18
+      ),
+    0 0 0 1px
+      rgba(
+        0,
+        0,
+        0,
+        0.34
+      );
+}
+
+.sliding-number-glyph {
+  position: absolute;
+  inset: 0;
+
+  display: grid;
+  place-items: center;
+
+  color:
+    rgba(
+      244,
+      244,
+      244,
+      0.96
+    );
+
+  font-size: 25px;
+  font-weight: 600;
+  line-height: 1;
+
+  text-shadow:
+    0 1px 1px
+      rgba(
+        0,
+        0,
+        0,
+        0.78
+      );
+}
+
+.seven-segment {
+  position: absolute;
+
+  border-radius: 999px;
+
+  background:
+    rgba(
+      83,
+      184,
+      224,
+      0.02
+    );
+
+  transition:
+    background 90ms linear,
+    box-shadow 90ms linear,
+    opacity 90ms linear;
+}
+
+.seven-segment.is-on {
+  background:
+    rgba(
+      104,
+      161,
+      179,
+      0.82
+    );
+
+  box-shadow:
+    0 0 3px
+      rgba(
+        110,
+        208,
+        239,
+        0.42
+      ),
+    0 0 6px
+      rgba(
+        66,
+        188,
+        235,
+        0.18
+      );
+
+  opacity: 1;
+}
+
+.segment-a,
+.segment-d,
+.segment-g {
+  left: 3.6px;
+
+  width: 12px;
+  height: 3px;
+}
+
+.segment-a {
+  top: 1.2px;
+}
+
+.segment-g {
+  top: 16.5px;
+}
+
+.segment-d {
+  bottom: 1.2px;
+}
+
+.segment-b,
+.segment-c,
+.segment-e,
+.segment-f {
+  width: 3px;
+  height: 12px;
+}
+
+.segment-b {
+  top: 3.6px;
+  right: 1.2px;
+}
+
+.segment-c {
+  right: 1.2px;
+  bottom: 3.6px;
+}
+
+.segment-e {
+  left: 1.2px;
+  bottom: 3.6px;
+}
+
+.segment-f {
+  top: 3.6px;
+  left: 1.2px;
+}
+
+.seven-segment-colon {
+  width: 6px;
+  height: 36px;
+
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+
+  gap: 7.2px;
+}
+
+.sliding-number-colon {
+  width: 7px;
+}
+
+.seven-segment-colon span {
+  width: 3px;
+  height: 3px;
+
+  border-radius: 50%;
+
+  background:
+    rgba(
+      164,
+      236,
+      255,
+      1
+    );
+
+  box-shadow:
+    0 0 0 1px
+      rgba(
+        0,
+        8,
+        12,
+        0.58
+      ),
+    0 0 4px
+      rgba(
+        89,
+        205,
+        245,
+        0.56
+      );
+}
+
+.quick-pip-duration-select {
+  width: 67px;
+
+  padding:
+    2px 3px;
+
+  border:
+    1px solid
+    rgba(
+      126,
+      219,
+      255,
+      0.16
+    );
+
+  border-radius: 5px;
+
+  outline: none;
+
+  background:
+    rgba(38, 107, 141, 0.34);
+
+  color:
+    rgba(31, 71, 87, 0.7);
+
+  font-family: inherit;
+  font-size: 10px;
+
+  cursor: pointer;
+
+  -webkit-app-region: no-drag;
+}
+
+.quick-pip-timer-actions {
+  display: flex;
+  justify-content: center;
+}
+
+.quick-pip-mini-button {
+  appearance: none;
+
+  margin: 0;
+  padding:
+    3px 7px;
+
+  border:
+    1px solid
+    rgba(
+      126,
+      219,
+      255,
+      0.20
+    );
+
+  border-radius: 999px;
+
+  background:
+    rgba(38, 107, 141, 0.34);
+
+
+  color:
+    rgba(31, 71, 87, 0.7);
+
+
+  font-family: inherit;
+  font-size: 10px;
+  font-weight: 500;
+
+  letter-spacing: 0.10em;
+
+  cursor: pointer;
+
+  -webkit-app-region: no-drag;
+}
+
+.quick-pip-mini-button:hover {
+  border-color:
+    rgba(
+      126,
+      219,
+      255,
+      0.46
+    );
+
+  color:
+    rgba(
+      222,
+      248,
+      255,
+      0.96
+    );
+}
+
+.quick-pip-open-main-hint {
+  color:
+    rgba(
+      174,
+      226,
+      247,
+      0.45
+    );
+
+  font-size: 9px;
+
+  letter-spacing: 0.12em;
+
+  user-select: none;
+}
+
+/* --------------------------------------------------
+   Current executable checklist step
+
+   전체 checklist는 Main에서 관리하고,
+   PiP에서는 첫 번째 미완료 항목 하나만 보여준다.
+   -------------------------------------------------- */
+
+.quick-pip-current-step {
+  position: absolute;
+
+  left: 50%;
+  bottom: -10px;
+
+  width: 226px;
+  min-height: 35px;
+
+  box-sizing: border-box;
+
+  display: grid;
+
+  grid-template-columns:
+    24px
+    minmax(0, 1fr);
+
+  align-items: center;
+
+  gap: 6px;
+
+  padding:
+    5px 8px;
+
+  border:
+    1px solid
+    rgba(
+      126,
+      219,
+      255,
+      0.11
+    );
+
+  border-radius: 10px;
+
+  background:
+    rgba(46, 93, 112, 0.2);
+
+  backdrop-filter:
+    blur(8px);
+
+  pointer-events: auto;
+
+  transform:
+    translateX(-50%)
+    translateY(3px)
+    scale(0.985);
+
+  -webkit-app-region: no-drag;
+}
+
+.quick-pip-enabled
+.pip-interaction-zone:hover
+.quick-pip-current-step,
+.quick-pip-enabled
+.pip-interaction-zone:focus-within
+.quick-pip-current-step {
+  transform:
+    translateX(-50%)
+    translateY(0)
+    scale(1);
+}
+
+.quick-pip-current-step.is-complete {
+  border-color:
+    rgba(
+      126,
+      219,
+      255,
+      0.17
+    );
+
+  background:
+    rgba(
+      8,
+      32,
+      42,
+      0.54
+    );
+}
+
+.quick-pip-current-step-toggle {
+  appearance: none;
+
+  width: 22px;
+  height: 22px;
+
+  display: grid;
+  place-items: center;
+
+  margin: 0;
+  padding: 0;
+
+  border:
+    1px solid
+    rgba(
+      126,
+      219,
+      255,
+      0.27
+    );
+
+  border-radius: 6px;
+
+  background:
+    rgba(
+      24,
+      79,
+      99,
+      0.10
+    );
+
+  color:
+    rgba(
+      190,
+      237,
+      252,
+      0.78
+    );
+
+  font-family: inherit;
+  font-size: 12px;
+
+  cursor: pointer;
+
+  -webkit-app-region: no-drag;
+}
+
+.quick-pip-current-step-toggle:hover {
+  border-color:
+    rgba(
+      126,
+      219,
+      255,
+      0.58
+    );
+
+  color:
+    rgba(
+      227,
+      249,
+      255,
+      0.98
+    );
+}
+
+.quick-pip-current-step-toggle:disabled {
+  cursor: default;
+}
+
+.quick-pip-current-step-copy {
+  min-width: 0;
+
+  display: flex;
+  flex-direction: column;
+
+  gap: 1px;
+}
+
+.quick-pip-current-step-label {
+  color:
+    rgba(
+      149,
+      228,
+      255,
+      0.66
+    );
+
+  font-size: 6px;
+  font-weight: 500;
+
+  letter-spacing: 0.18em;
+
+  text-shadow:
+    0 1px 2px
+      rgba(
+        0,
+        5,
+        8,
+        0.92
+      );
+
+  user-select: none;
+}
+
+.quick-pip-current-step-text {
+  overflow: hidden;
+
+  color:
+    rgba(
+      221,
+      247,
+      254,
+      0.92
+    );
+
+  font-size: 12px;
+  line-height: 1.25;
+
+  text-overflow: ellipsis;
+  white-space: nowrap;
+
+  text-shadow:
+    0 1px 2px
+      rgba(
+        0,
+        5,
+        8,
+        0.94
+      ),
+    0 0 5px
+      rgba(
+        0,
+        5,
+        8,
+        0.54
+      );
+
+  user-select: none;
+}
+
+.quick-pip-current-step.is-complete
+.quick-pip-current-step-text {
+  color:
+    rgba(
+      169,
+      221,
+      239,
+      0.48
+    );
+
+  text-decoration:
+    line-through;
+}
+
+
+/* ==================================================
+   Command Center spatial interface — v2 monochrome
+
+   Direction:
+   - Core 중심 spatial field
+   - 기본 interface는 black / white / neutral gray
+   - 기존 cyan palette는 .jarvis-shell의 legacy variables로 보존
+   - Motion Primitives의 아이디어를 "효과 복붙"이 아니라
+     interaction language로 재구현
+   ================================================== */
+
+.command-center-interface {
+  position: absolute;
+  inset: 0;
+
+  z-index: 2;
+
+  overflow: hidden;
+
+  perspective: 1500px;
+  perspective-origin: 50% 50%;
+
+  pointer-events: none;
+
+  --command-surface:
+    rgba(8, 8, 8, 0.68);
+  --command-surface-strong:
+    rgba(12, 12, 12, 0.90);
+  --command-surface-hover:
+    rgba(20, 20, 20, 0.88);
+
+  --command-border:
+    rgba(255, 255, 255, 0.11);
+  --command-border-strong:
+    rgba(255, 255, 255, 0.32);
+  --command-border-active:
+    rgba(255, 255, 255, 0.58);
+
+  --command-text:
+    rgba(255, 255, 255, 0.96);
+  --command-text-soft:
+    rgba(255, 255, 255, 0.67);
+  --command-text-muted:
+    rgba(255, 255, 255, 0.38);
+
+  --command-accent:
+    rgb(255, 255, 255);
+  --command-accent-soft:
+    rgba(255, 255, 255, 0.075);
+  --command-control:
+    rgba(255, 255, 255, 0.045);
+
+  --command-radius:
+    18px;
+  --command-radius-sm:
+    10px;
+}
+
+/*
+  Fullscreen에서만 Core를 monochrome으로 보이게 한다.
+  원래 cyan Core 색 값은 위의 기존 rules에 그대로 남아 있고,
+  PiP에서도 그대로 사용된다.
+*/
+.core-outer-ring {
+  filter:
+    grayscale(1)
+    saturate(0)
+    brightness(1.16);
+
+  transition:
+    filter 460ms
+    cubic-bezier(
+      0.22,
+      1,
+      0.36,
+      1
+    );
+}
+
+.core-outer-ring::before {
+  border-color:
+    rgba(255, 255, 255, 0.22);
+
+  background:
+    radial-gradient(
+      circle at 36% 28%,
+      rgba(255, 255, 255, 0.09) 0%,
+      rgba(255, 255, 255, 0.032) 34%,
+      rgba(255, 255, 255, 0) 68%
+    );
+
+  box-shadow:
+    inset 7px 5px 18px
+      rgba(255, 255, 255, 0.035),
+    inset -7px -8px 20px
+      rgba(255, 255, 255, 0.018),
+    0 0 18px
+      rgba(255, 255, 255, 0.035);
+}
+
+.core-orbit {
+  border-color:
+    rgba(255, 255, 255, 0.72);
+
+  box-shadow:
+    0 0 1px
+      rgba(255, 255, 255, 0.58),
+    0 0 4px
+      rgba(255, 255, 255, 0.28),
+    0 0 12px
+      rgba(255, 255, 255, 0.09);
+}
+
+.core-orbit-b,
+.core-orbit-d {
+  border-color:
+    rgba(255, 255, 255, 0.52);
+}
+
+.core-energy {
+  background:
+    radial-gradient(
+      circle,
+      rgba(255, 255, 255, 1) 0%,
+      rgba(238, 238, 238, 0.94) 24%,
+      rgba(158, 158, 158, 0.58) 54%,
+      rgba(118, 118, 118, 0.20) 76%,
+      rgba(255, 255, 255, 0) 100%
+    );
+
+  box-shadow:
+    0 0 44px
+      rgba(255, 255, 255, 0.55),
+    0 0 70px
+      rgba(255, 255, 255, 0.23),
+    0 0 88px
+      rgba(255, 255, 255, 0.10);
+}
+
+.command-center-mode
+.core-label {
+  color:
+    rgba(
+      255,
+      255,
+      255,
+      0.42
+    );
+}
+
+.pip-mode
+.core-label {
+  color:
+    rgba(
+      255,
+      255,
+      255,
+      0.48
+    );
+}
+
+/* --------------------------------------------------
+   Spatial field guides
+   -------------------------------------------------- */
+
+.command-center-axis {
+  position: absolute;
+
+  left: 50%;
+  top: 50%;
+
+  z-index: 1;
+
+  pointer-events: none;
+
+  opacity: 0.26;
+}
+
+.command-center-axis-horizontal {
+  width:
+    min(
+      760px,
+      54vw
+    );
+
+  height: 1px;
+
+  transform:
+    translate(
+      -50%,
+      -50%
+    );
+
+  background:
+    linear-gradient(
+      90deg,
+      transparent,
+      rgba(
+        255,
+        255,
+        255,
+        0.10
+      )
+      24%,
+      rgba(
+        255,
+        255,
+        255,
+        0.20
+      )
+      50%,
+      rgba(
+        255,
+        255,
+        255,
+        0.10
+      )
+      76%,
+      transparent
+    );
+}
+
+.command-center-axis-vertical {
+  width: 1px;
+
+  height:
+    min(
+      650px,
+      68vh
+    );
+
+  transform:
+    translate(
+      -50%,
+      -50%
+    );
+
+  background:
+    linear-gradient(
+      180deg,
+      transparent,
+      rgba(
+        255,
+        255,
+        255,
+        0.08
+      )
+      25%,
+      rgba(
+        255,
+        255,
+        255,
+        0.16
+      )
+      50%,
+      rgba(
+        255,
+        255,
+        255,
+        0.08
+      )
+      75%,
+      transparent
+    );
+}
+
+.command-workspace {
+  position: absolute;
+  inset: 0;
+
+  z-index: 3;
+
+  pointer-events: none;
+}
+
+.command-center-orbit-guide {
+  position: absolute;
+
+  left: 50%;
+  top: 50%;
+
+  border:
+    1px solid
+    rgba(
+      255,
+      255,
+      255,
+      0.045
+    );
+
+  border-radius: 50%;
+
+  pointer-events: none;
+}
+
+.command-center-orbit-guide-a {
+  width: 50vw;
+  height: 29vw;
+
+  transform:
+    translate(
+      -50%,
+      -50%
+    )
+    rotateX(68deg)
+    rotateZ(12deg);
+}
+
+.command-center-orbit-guide-b {
+  width: 64vw;
+  height: 37vw;
+
+  transform:
+    translate(
+      -50%,
+      -50%
+    )
+    rotateX(72deg)
+    rotateZ(-24deg);
+}
+
+/* --------------------------------------------------
+   Shared surface
+   Spotlight-inspired pointer illumination
+   -------------------------------------------------- */
+
+.command-panel {
+  position: absolute;
+
+  --panel-entry-x: 0px;
+  --panel-entry-y: 0px;
+  --panel-entry-scale: 1;
+
+  --surface-light-x: 50%;
+  --surface-light-y: 50%;
+  --surface-light-opacity: 0;
+
+  box-sizing: border-box;
+
+  border:
+    1px solid
+    var(--command-border);
+
+  border-radius:
+    var(--command-radius);
+
+  background:
+    linear-gradient(
+      180deg,
+      rgba(
+        255,
+        255,
+        255,
+        0.035
+      ),
+      rgba(
+        255,
+        255,
+        255,
+        0
+      )
+      38%
+    ),
+    var(--command-surface);
+
+  box-shadow:
+    0 28px 70px
+      rgba(
+        0,
+        0,
+        0,
+        0.34
+      ),
+    inset 0 1px 0
+      rgba(
+        255,
+        255,
+        255,
+        0.035
+      );
+
+  backdrop-filter:
+    blur(18px)
+    saturate(92%);
+
+  color:
+    var(--command-text-soft);
+
+  pointer-events: auto;
+
+  transform-style:
+    preserve-3d;
+
+  will-change:
+    transform,
+    opacity;
+
+  -webkit-app-region: no-drag;
+
+  transition:
+    border-color 180ms ease,
+    background-color 180ms ease,
+    box-shadow 180ms ease;
+}
+
+/*
+  Mouse-reactive Spotlight.
+  JSX는 pointer 좌표만 CSS variable에 기록한다.
+*/
+.command-panel::before {
+  content: '';
+
+  position: absolute;
+  inset: 0;
+
+  z-index: 0;
+
+  border-radius: inherit;
+
+  background:
+    radial-gradient(
+      260px circle
+      at
+      var(--surface-light-x)
+      var(--surface-light-y),
+      rgba(
+        255,
+        255,
+        255,
+        0.105
+      ),
+      rgba(
+        255,
+        255,
+        255,
+        0.025
+      )
+      36%,
+      transparent
+      70%
+    );
+
+  opacity:
+    var(--surface-light-opacity);
+
+  pointer-events: none;
+
+  transition:
+    opacity 180ms ease-out;
+}
+
+.command-panel > * {
+  position: relative;
+  z-index: 1;
+}
+
+.command-panel:hover {
+  border-color:
+    rgba(
+      255,
+      255,
+      255,
+      0.22
+    );
+
+  background-color:
+    rgba(
+      14,
+      14,
+      14,
+      0.78
+    );
+}
+
+/* --------------------------------------------------
+   Spatial composition
+
+   Core는 App.jsx가 viewport 정중앙에 유지한다.
+   각 surface는 Core를 둘러싸는 cross-field로 배치한다.
+   -------------------------------------------------- */
+
+.command-panel-objective {
+  top:
+    clamp(
+      30px,
+      6vh,
+      68px
+    );
+
+  left: 50%;
+
+  width:
+    min(
+      560px,
+      46vw
+    );
+
+  min-height: 64px;
+
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+
+  gap: 24px;
+
+  padding:
+    13px
+    16px;
+
+  transform:
+    translate3d(
+      calc(
+        -50% +
+        var(--panel-entry-x)
+      ),
+      var(--panel-entry-y),
+      0
+    )
+    scale(
+      var(--panel-entry-scale)
+    );
+
+  animation:
+    command-float-a
+    10s
+    ease-in-out
+    infinite;
+}
+
+.command-panel-next-action {
+  left:
+    clamp(
+      34px,
+      6vw,
+      110px
+    );
+
+  top: 50%;
+
+  width:
+    clamp(
+      340px,
+      31vw,
+      520px
+    );
+
+  min-height:
+    220px;
+
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+
+  padding:
+    clamp(
+      22px,
+      2.4vw,
+      34px
+    );
+
+  transform:
+    translate3d(
+      var(--panel-entry-x),
+      calc(
+        -50% +
+        var(--panel-entry-y)
+      ),
+      0
+    )
+    scale(
+      var(--panel-entry-scale)
+    )
+    rotateY(3deg);
+
+  animation:
+    command-float-b
+    11s
+    ease-in-out
+    infinite;
+}
+
+/*
+  Border Trail reference를 의미 기반으로 축소 적용.
+  실제 run이 active일 때만 얇은 white energy가 살아난다.
+*/
+.command-panel-next-action.is-executing {
+  border-color:
+    var(--command-border-active);
+
+  box-shadow:
+    0 30px 90px
+      rgba(
+        0,
+        0,
+        0,
+        0.42
+      ),
+    0 0 0 1px
+      rgba(
+        255,
+        255,
+        255,
+        0.04
+      ),
+    0 0 42px
+      rgba(
+        255,
+        255,
+        255,
+        0.055
+      );
+}
+
+.command-panel-next-action.is-executing::after {
+  content: '';
+
+  position: absolute;
+
+  left: 18px;
+  top: -1px;
+
+  width: 88px;
+  height: 1px;
+
+  border-radius: 999px;
+
+  background:
+    linear-gradient(
+      90deg,
+      transparent,
+      rgba(
+        255,
+        255,
+        255,
+        0.95
+      ),
+      transparent
+    );
+
+  filter:
+    drop-shadow(
+      0 0 5px
+      rgba(
+        255,
+        255,
+        255,
+        0.55
+      )
+    );
+
+  animation:
+    command-border-trail
+    4.8s
+    ease-in-out
+    infinite;
+
+  pointer-events: none;
+}
+
+.command-panel-next-action.is-paused {
+  opacity: 0.74;
+}
+
+.command-panel-timer {
+  right:
+    clamp(
+      34px,
+      6vw,
+      110px
+    );
+
+  top: 50%;
+
+  width:
+    clamp(
+      270px,
+      23vw,
+      370px
+    );
+
+  padding:
+    20px;
+
+  transform:
+    translate3d(
+      var(--panel-entry-x),
+      calc(
+        -50% +
+        var(--panel-entry-y)
+      ),
+      0
+    )
+    scale(
+      var(--panel-entry-scale)
+    )
+    rotateY(-3deg);
+
+  animation:
+    command-float-c
+    10.5s
+    ease-in-out
+    infinite;
+}
+
+.command-panel-checklist {
+  left: 50%;
+
+  bottom:
+    clamp(
+      24px,
+      5vh,
+      54px
+    );
+
+  width:
+    min(
+      620px,
+      48vw
+    );
+
+  max-height:
+    min(
+      300px,
+      31vh
+    );
+
+  display: flex;
+  flex-direction: column;
+
+  padding:
+    17px
+    18px;
+
+  transform:
+    translate3d(
+      calc(
+        -50% +
+        var(--panel-entry-x)
+      ),
+      var(--panel-entry-y),
+      0
+    )
+    scale(
+      var(--panel-entry-scale)
+    );
+
+  animation:
+    command-float-d
+    12s
+    ease-in-out
+    infinite;
+}
+
+@keyframes command-border-trail {
+  0%,
+  100% {
+    left: 18px;
+    opacity: 0.18;
+  }
+
+  46% {
+    left:
+      calc(
+        100% -
+        106px
+      );
+    opacity: 0.92;
+  }
+
+  60% {
+    left:
+      calc(
+        100% -
+        106px
+      );
+    opacity: 0.16;
+  }
+}
+
+@keyframes command-float-a {
+  0%,
+  100% {
+    translate: 0 0;
+  }
+
+  50% {
+    translate: 0 -3px;
+  }
+}
+
+@keyframes command-float-b {
+  0%,
+  100% {
+    translate: 0 0;
+  }
+
+  50% {
+    translate: 3px -3px;
+  }
+}
+
+@keyframes command-float-c {
+  0%,
+  100% {
+    translate: 0 0;
+  }
+
+  50% {
+    translate: -3px -3px;
+  }
+}
+
+@keyframes command-float-d {
+  0%,
+  100% {
+    translate: 0 0;
+  }
+
+  50% {
+    translate: 0 -3px;
+  }
+}
+
+/* --------------------------------------------------
+   Typography / semantic hierarchy
+   -------------------------------------------------- */
+
+.command-panel-eyebrow {
+  color:
+    var(--command-text-muted);
+
+  font-size: 9px;
+  font-weight: 650;
+
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+
+.command-panel-heading-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+
+  gap: 12px;
+}
+
+.command-context-left,
+.command-context-right,
+.command-title-with-icon,
+.command-action-header,
+.command-complete-badge,
+.command-status-badge,
+.command-action-button {
+  display: flex;
+  align-items: center;
+}
+
+.command-context-left {
+  min-width: 0;
+
+  gap: 10px;
+}
+
+.command-context-right {
+  flex-shrink: 0;
+
+  flex-direction: column;
+  align-items: flex-end;
+
+  gap: 5px;
+}
+
+.command-title-with-icon,
+.command-action-header {
+  gap: 8px;
+}
+
+.command-action-header {
+  justify-content:
+    space-between;
+}
+
+.command-section-icon {
+  flex-shrink: 0;
+
+  color:
+    var(--command-text-soft);
+
+  opacity: 0.72;
+}
+
+.command-panel-meta {
+  color:
+    var(--command-text-muted);
+
+  font-size: 9px;
+  line-height: 1.45;
+
+  letter-spacing: 0.04em;
+}
+
+.command-objective-text {
+  margin-top: 2px;
+
+  overflow: hidden;
+
+  color:
+    var(--command-text);
+
+  font-size:
+    clamp(
+      14px,
+      1.2vw,
+      17px
+    );
+
+  font-weight: 560;
+  line-height: 1.25;
+
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.command-objective-path {
+  max-width: 520px;
+
+  margin-top: 5px;
+
+  overflow: hidden;
+
+  color:
+    rgba(
+      255,
+      255,
+      255,
+      0.36
+    );
+
+  font-size: 9px;
+  line-height: 1.3;
+
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.command-next-action-input {
+  width: 100%;
+
+  box-sizing: border-box;
+
+  margin-top: 20px;
+  padding: 0;
+
+  border: 0;
+
+  outline: none;
+
+  background:
+    transparent;
+
+  color:
+    var(--command-text);
+
+  font-family: inherit;
+
+  font-size:
+    clamp(
+      30px,
+      3.15vw,
+      52px
+    );
+
+  font-weight: 610;
+  line-height: 1.02;
+
+  letter-spacing:
+    -0.035em;
+}
+
+.command-next-action-input::placeholder {
+  color:
+    rgba(
+      255,
+      255,
+      255,
+      0.22
+    );
+}
+
+.command-next-action-input:focus-visible {
+  outline:
+    1px solid
+    rgba(
+      255,
+      255,
+      255,
+      0.34
+    );
+
+  outline-offset: 8px;
+}
+
+.command-next-action-input.is-complete {
+  color:
+    var(--command-text-muted);
+
+  text-decoration:
+    line-through;
+}
+
+.command-action-footer {
+  margin-top: 24px;
+  padding-top: 12px;
+
+  border-top:
+    1px solid
+    rgba(
+      255,
+      255,
+      255,
+      0.075
+    );
+
+  color:
+    var(--command-text-muted);
+
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.command-complete-badge,
+.command-status-badge {
+  gap: 5px;
+
+  padding:
+    4px 8px;
+
+  border:
+    1px solid
+    var(--command-border);
+
+  border-radius: 999px;
+
+  background:
+    var(--command-accent-soft);
+
+  color:
+    var(--command-text-soft);
+
+  font-size: 8px;
+  font-weight: 650;
+
+  letter-spacing:
+    0.10em;
+
+  text-transform:
+    uppercase;
+}
+
+.command-status-badge.is-live {
+  border-color:
+    rgba(
+      255,
+      255,
+      255,
+      0.34
+    );
+
+  color:
+    var(--command-text);
+}
+
+.command-status-badge.is-paused {
+  color:
+    rgba(
+      255,
+      255,
+      255,
+      0.55
+    );
+}
+
+/* --------------------------------------------------
+   Timer
+   -------------------------------------------------- */
+
+.command-timer-value {
+  min-height: 38.4px;
+
+  display: flex;
+  align-items: center;
+
+  margin-top: 16px;
+
+  /*
+    기존 SevenSegmentTime의 cyan geometry는 유지하되
+    Command Center에서만 monochrome으로 표현한다.
+  */
+  filter:
+    grayscale(1)
+    brightness(1.55);
+}
+
+.command-seven-segment-time {
+  flex-shrink: 0;
+}
+
+.command-duration-custom {
+  display: flex;
+
+  gap: 8px;
+
+  margin-top: 13px;
+}
+
+.command-duration-field {
+  min-width: 70px;
+
+  display: grid;
+
+  grid-template-columns:
+    minmax(0, 1fr)
+    auto;
+
+  align-items: center;
+
+  overflow: hidden;
+
+  border:
+    1px solid
+    var(--command-border);
+
+  border-radius:
+    var(--command-radius-sm);
+
+  background:
+    var(--command-control);
+}
+
+.command-duration-field:focus-within {
+  border-color:
+    var(--command-border-strong);
+
+  box-shadow:
+    0 0 0 3px
+    rgba(
+      255,
+      255,
+      255,
+      0.045
+    );
+}
+
+.command-duration-input {
+  min-width: 0;
+  width: 100%;
+
+  padding:
+    8px 2px
+    8px 10px;
+
+  border: 0;
+
+  outline: none;
+
+  background:
+    transparent;
+
+  color:
+    var(--command-text);
+
+  font-family: inherit;
+  font-size: 13px;
+
+  font-variant-numeric:
+    tabular-nums;
+}
+
+.command-duration-unit {
+  padding-right: 9px;
+
+  color:
+    var(--command-text-muted);
+
+  font-size: 8px;
+  font-weight: 700;
+
+  letter-spacing: 0.12em;
+}
+
+.command-auto-extend {
+  margin-top: 8px;
+
+  color:
+    var(--command-text-soft);
+
+  font-size: 8px;
+  font-weight: 650;
+
+  letter-spacing: 0.10em;
+}
+
+.command-duration-presets {
+  display: flex;
+  flex-wrap: wrap;
+
+  gap: 6px;
+
+  margin-top: 13px;
+}
+
+.command-duration-button,
+.command-action-button {
+  appearance: none;
+
+  border:
+    1px solid
+    var(--command-border);
+
+  background:
+    var(--command-control);
+
+  color:
+    var(--command-text-soft);
+
+  font-family: inherit;
+
+  cursor: pointer;
+
+  transition:
+    border-color 130ms ease-out,
+    background 130ms ease-out,
+    color 130ms ease-out,
+    opacity 130ms ease-out;
+
+  -webkit-app-region:
+    no-drag;
+}
+
+.command-duration-button {
+  min-width: 38px;
+
+  padding:
+    6px 8px;
+
+  border-radius:
+    var(--command-radius-sm);
+
+  font-size: 9px;
+  font-weight: 650;
+}
+
+.command-duration-button:hover:not(:disabled),
+.command-action-button:hover:not(:disabled) {
+  border-color:
+    var(--command-border-strong);
+
+  background:
+    rgba(
+      255,
+      255,
+      255,
+      0.085
+    );
+
+  color:
+    var(--command-text);
+}
+
+.command-duration-button.is-selected {
+  border-color:
+    var(--command-border-strong);
+
+  color:
+    var(--command-text);
+
+  background:
+    rgba(
+      255,
+      255,
+      255,
+      0.10
+    );
+}
+
+.command-duration-button:disabled {
+  cursor: default;
+
+  opacity: 0.32;
+}
+
+.command-timer-actions {
+  display: flex;
+  flex-wrap: wrap;
+
+  gap: 8px;
+
+  margin-top: 15px;
+}
+
+.command-action-button {
+  gap: 7px;
+
+  padding:
+    8px 12px;
+
+  border-radius:
+    var(--command-radius-sm);
+
+  font-size: 9px;
+  font-weight: 700;
+
+  letter-spacing:
+    0.12em;
+}
+
+.command-action-button.primary {
+  border-color:
+    var(--command-border-strong);
+
+  color:
+    #050505;
+
+  background:
+    rgba(
+      255,
+      255,
+      255,
+      0.92
+    );
+}
+
+.command-action-button.primary:hover:not(:disabled) {
+  border-color:
+    rgba(
+      255,
+      255,
+      255,
+      0.82
+    );
+
+  background:
+    #ffffff;
+
+  color:
+    #050505;
+}
+
+.command-action-button.subtle {
+  opacity: 0.58;
+}
+
+/* --------------------------------------------------
+   Checklist — AnimatedBackground-style state language
+   -------------------------------------------------- */
+
+.command-progress-label {
+  color:
+    var(--command-text-muted);
+
+  font-size: 10px;
+  font-weight: 650;
+
+  font-variant-numeric:
+    tabular-nums;
+}
+
+.command-progress-track {
+  height: 2px;
+
+  margin-top: 11px;
+
+  overflow: hidden;
+
+  border-radius: 999px;
+
+  background:
+    rgba(
+      255,
+      255,
+      255,
+      0.07
+    );
+}
+
+.command-progress-fill {
+  height: 100%;
+
+  border-radius: inherit;
+
+  background:
+    rgba(
+      255,
+      255,
+      255,
+      0.86
+    );
+
+  transition:
+    width 180ms
+    ease-out;
+}
+
+.command-checklist-items {
+  max-height: 100%;
+
+  margin-top: 10px;
+
+  overflow-y: auto;
+  overflow-x: hidden;
+
+  scrollbar-width: none;
+}
+
+.command-checklist-items::-webkit-scrollbar {
+  display: none;
+}
+
+.command-empty-checklist {
+  padding: 18px 0;
+
+  color:
+    var(--command-text-muted);
+
+  font-size: 12px;
+}
+
+.command-check-item {
+  position: relative;
+
+  min-height: 38px;
+
+  display: grid;
+
+  grid-template-columns:
+    28px
+    minmax(0, 1fr)
+    24px;
+
+  align-items: center;
+
+  gap: 9px;
+
+  margin-top: 4px;
+  padding:
+    6px 8px;
+
+  border:
+    1px solid
+    transparent;
+
+  border-radius:
+    var(--command-radius-sm);
+
+  transition:
+    border-color 140ms ease-out,
+    background 140ms ease-out,
+    opacity 140ms ease-out;
+}
+
+.command-check-item:hover {
+  border-color:
+    rgba(
+      255,
+      255,
+      255,
+      0.09
+    );
+
+  background:
+    rgba(
+      255,
+      255,
+      255,
+      0.045
+    );
+}
+
+.command-check-item.is-current {
+  border-color:
+    rgba(
+      255,
+      255,
+      255,
+      0.18
+    );
+
+  background:
+    rgba(
+      255,
+      255,
+      255,
+      0.075
+    );
+
+  box-shadow:
+    inset 2px 0 0
+    rgba(
+      255,
+      255,
+      255,
+      0.82
+    );
+}
+
+.command-check-item.is-done {
+  opacity: 0.36;
+}
+
+.command-check-toggle,
+.command-check-delete,
+.command-add-step button {
+  appearance: none;
+
+  margin: 0;
+  padding: 0;
+
+  border: 0;
+
+  background:
+    transparent;
+
+  color:
+    var(--command-text-soft);
+
+  font-family: inherit;
+
+  cursor: pointer;
+
+  -webkit-app-region:
+    no-drag;
+}
+
+.command-check-toggle {
+  width: 24px;
+  height: 24px;
+
+  display: grid;
+  place-items: center;
+
+  border:
+    1px solid
+    rgba(
+      255,
+      255,
+      255,
+      0.12
+    );
+
+  border-radius: 7px;
+
+  background:
+    rgba(
+      255,
+      255,
+      255,
+      0.025
+    );
+}
+
+.command-check-toggle:disabled,
+.command-check-delete:disabled {
+  cursor: default;
+
+  opacity: 0.30;
+}
+
+.command-check-content {
+  min-width: 0;
+
+  display: flex;
+  flex-direction: column;
+
+  gap: 1px;
+}
+
+.command-current-label {
+  color:
+    var(--command-text);
+
+  font-size: 7px;
+  font-weight: 700;
+
+  letter-spacing: 0.13em;
+
+  text-transform:
+    uppercase;
+}
+
+.command-check-text {
+  overflow: hidden;
+
+  color:
+    var(--command-text-soft);
+
+  font-size: 13px;
+  line-height: 1.35;
+
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.command-check-item.is-done
+.command-check-text {
+  text-decoration:
+    line-through;
+}
+
+.command-check-delete {
+  width: 22px;
+  height: 22px;
+
+  display: grid;
+  place-items: center;
+
+  color:
+    rgba(
+      255,
+      255,
+      255,
+      0.22
+    );
+}
+
+.command-check-delete:hover {
+  color:
+    var(--command-text);
+}
+
+.command-add-step {
+  display: grid;
+
+  grid-template-columns:
+    minmax(0, 1fr)
+    32px;
+
+  gap: 8px;
+
+  margin-top: 11px;
+}
+
+.command-add-step input {
+  min-width: 0;
+
+  padding:
+    9px 10px;
+
+  border:
+    1px solid
+    var(--command-border);
+
+  border-radius:
+    var(--command-radius-sm);
+
+  outline: none;
+
+  background:
+    var(--command-control);
+
+  color:
+    var(--command-text-soft);
+
+  font-family: inherit;
+  font-size: 12px;
+
+  -webkit-app-region:
+    no-drag;
+}
+
+.command-add-step input:focus {
+  border-color:
+    var(--command-border-strong);
+}
+
+.command-add-step button {
+  display: grid;
+  place-items: center;
+
+  border:
+    1px solid
+    rgba(
+      255,
+      255,
+      255,
+      0.14
+    );
+
+  border-radius:
+    var(--command-radius-sm);
+}
+
+.command-add-step button:disabled {
+  cursor: default;
+
+  opacity: 0.24;
+}
+
+/*
+  V2에서는 연결되지 않은 WEATHER / CALENDAR / NEWS text를 숨긴다.
+  component 자체는 JSX에 남겨 future integration 지점을 보존한다.
+*/
+.command-external-module {
+  display: none;
+}
+
+/* --------------------------------------------------
+   Responsive
+   -------------------------------------------------- */
+
+@media (
+  max-width: 1120px
+) {
+  .command-panel-next-action {
+    left: 28px;
+
+    width:
+      min(
+        36vw,
+        430px
+      );
+  }
+
+  .command-panel-timer {
+    right: 28px;
+
+    width:
+      min(
+        28vw,
+        330px
+      );
+  }
+
+  .command-panel-checklist {
+    width:
+      min(
+        600px,
+        58vw
+      );
+  }
+}
+
+@media (
+  max-width: 860px
+) {
+  .command-center-axis,
+  .command-center-orbit-guide {
+    opacity: 0.12;
+  }
+
+  .command-panel-objective {
+    width:
+      calc(
+        100vw -
+        40px
+      );
+  }
+
+  .command-panel-next-action {
+    top: 38%;
+
+    left: 20px;
+
+    width:
+      calc(
+        55vw -
+        30px
+      );
+
+    min-height: 190px;
+  }
+
+  .command-panel-timer {
+    top: 38%;
+
+    right: 20px;
+
+    width:
+      calc(
+        40vw -
+        20px
+      );
+  }
+
+  .command-panel-checklist {
+    width:
+      calc(
+        100vw -
+        40px
+      );
+
+    max-height: 24vh;
+  }
+}
+
+@media (
+  max-height: 720px
+) {
+  .command-panel-objective {
+    top: 18px;
+  }
+
+  .command-panel-next-action,
+  .command-panel-timer {
+    top: 46%;
+  }
+
+  .command-panel-checklist {
+    bottom: 16px;
+
+    max-height: 26vh;
+  }
+}
+
+
+.quick-pip-pause-resume-button {
+  padding:
+    4px 12px;
+
+  border: 1px solid rgba(126, 218, 255, 0.542);
+
+  background: transparent;
+
+  border-radius: 10px;
+
+  box-shadow: none;
+
+  color:
+    rgba(
+      210,
+      243,
+      253,
+      0.88
+    );
+
+  font-size: 12px;
+
+  text-shadow:
+    0 1px 2px
+      rgba(
+        0,
+        6,
+        10,
+        0.94
+      ),
+    0 0 2px
+      rgba(
+        0,
+        6,
+        10,
+        0.54
+      );
+}
+
+/* --------------------------------------------------
+   PiP monochrome system skin
+
+   Fullscreen System Home과 같은 core identity를 쓰되,
+   hover/quick controls의 기존 behavior는 유지한다.
+   -------------------------------------------------- */
+
+.quick-pip {
+  color:
+    rgba(
+      255,
+      255,
+      255,
+      0.78
+    );
+}
+
+.quick-pip-kicker,
+.quick-pip-current-step-label {
+  color:
+    rgba(
+      255,
+      255,
+      255,
+      0.60
+    );
+}
+
+.quick-pip-action-text,
+.quick-pip-current-step-text {
+  color:
+    rgba(
+      255,
+      255,
+      255,
+      0.92
+    );
+}
+
+.quick-pip-action-text.is-complete,
+.quick-pip-current-step.is-complete
+.quick-pip-current-step-text {
+  color:
+    rgba(
+      255,
+      255,
+      255,
+      0.42
+    );
+}
+
+.quick-pip-mini-button,
+.quick-pip-pause-resume-button {
+  border-color:
+    rgba(
+      255,
+      255,
+      255,
+      0.28
+    );
+
+  background:
+    rgba(
+      0,
+      0,
+      0,
+      0.16
+    );
+
+  color:
+    rgba(
+      255,
+      255,
+      255,
+      0.84
+    );
+}
+
+.quick-pip-mini-button:hover,
+.quick-pip-pause-resume-button:hover {
+  border-color:
+    rgba(
+      255,
+      255,
+      255,
+      0.48
+    );
+
+  background:
+    rgba(
+      255,
+      255,
+      255,
+      0.08
+    );
+}
+
+.quick-pip-timer
+.seven-segment-time {
+  filter:
+    grayscale(1)
+    brightness(0.86)
+    contrast(1.18)
+    drop-shadow(
+      0 1px 1px
+      rgba(
+        0,
+        0,
+        0,
+        0.42
+      )
+    )
+    drop-shadow(
+      0 0 7px
+      rgba(
+        255,
+        255,
+        255,
+        0.18
+      )
+    );
+}
+
+.quick-pip-timer
+.seven-segment {
+  background:
+    rgba(
+      12,
+      12,
+      12,
+      0.13
+    );
+}
+
+.quick-pip-timer
+.seven-segment.is-on {
+  background:
+    rgba(
+      35,
+      35,
+      35,
+      0.92
+    );
+
+  box-shadow:
+    0 1px 2px
+      rgba(31, 31, 31, 0.184);
+
+  opacity: 1;
+}
+
+.quick-pip-timer
+.seven-segment-colon span {
+  background:
+    rgba(18, 18, 18, 0.534);
+
+  box-shadow:
+    0 1px 2px
+      rgba(
+        0,
+        0,
+        0,
+        0.28
+      );
+}
+
+.quick-pip-timer
+.sliding-number-time {
+  filter:
+    drop-shadow(
+      0 1px 1px
+      rgba(
+        0,
+        0,
+        0,
+        0.46
+      )
+    )
+    drop-shadow(
+      0 0 8px
+      rgba(
+        255,
+        255,
+        255,
+        0.18
+      )
+    );
+}
+
+.quick-pip-timer
+.sliding-number-digit {
+  border-color:
+    rgba(
+      255,
+      255,
+      255,
+      0.42
+    );
+
+  background:
+    linear-gradient(
+      180deg,
+      rgba(
+        255,
+        255,
+        255,
+        0.38
+      ),
+      rgba(
+        255,
+        255,
+        255,
+        0.13
+      )
+    );
+
+  box-shadow:
+    inset 0 1px 0
+      rgba(
+        255,
+        255,
+        255,
+        0.38
+      ),
+    0 0 0 1px
+      rgba(
+        0,
+        0,
+        0,
+        0.36
+      ),
+    0 2px 8px
+      rgba(
+        0,
+        0,
+        0,
+        0.22
+      );
+}
+
+.quick-pip-timer
+.sliding-number-glyph {
+  color:
+    rgba(
+      18,
+      18,
+      18,
+      0.88
+    );
+
+  text-shadow:
+    0 1px 0
+      rgba(
+        255,
+        255,
+        255,
+        0.28
+      );
+}
+
+.quick-pip-duration-select {
+  border-color:
+    rgba(
+      18,
+      18,
+      18,
+      0.28
+    );
+
+  background:
+    rgba(
+      255,
+      255,
+      255,
+      0.72
+    );
+
+  color:
+    rgba(
+      12,
+      12,
+      12,
+      0.78
+    );
+
+  box-shadow:
+    0 1px 2px
+      rgba(
+        0,
+        0,
+        0,
+        0.18
+      ),
+    inset 0 1px 0
+      rgba(
+        255,
+        255,
+        255,
+        0.42
+      );
+}
+
+.quick-pip-duration-select:focus-visible {
+  outline:
+    1px solid
+    rgba(
+      18,
+      18,
+      18,
+      0.52
+    );
+
+  outline-offset: 2px;
+}
+
+.quick-pip-current-step {
+  border-color:
+    rgba(
+      18,
+      18,
+      18,
+      0.22
+    );
+
+  background:
+    rgba(
+      255,
+      255,
+      255,
+      0.58
+    );
+
+  box-shadow:
+    0 1px 2px
+      rgba(
+        0,
+        0,
+        0,
+        0.20
+      ),
+    0 10px 26px
+      rgba(
+        0,
+        0,
+        0,
+        0.12
+      );
+}
+
+.quick-pip-current-step.is-complete {
+  border-color:
+    rgba(
+      18,
+      18,
+      18,
+      0.18
+    );
+
+  background:
+    rgba(
+      246,
+      246,
+      246,
+      0.50
+    );
+}
+
+.quick-pip-current-step-toggle {
+  border-color:
+    rgba(
+      18,
+      18,
+      18,
+      0.32
+    );
+
+  background:
+    rgba(
+      255,
+      255,
+      255,
+      0.42
+    );
+
+  color:
+    rgba(
+      18,
+      18,
+      18,
+      0.74
+    );
+}
+
+.quick-pip-current-step-toggle:hover {
+  border-color:
+    rgba(
+      18,
+      18,
+      18,
+      0.56
+    );
+
+  background:
+    rgba(
+      255,
+      255,
+      255,
+      0.72
+    );
+
+  color:
+    rgba(
+      0,
+      0,
+      0,
+      0.88
+    );
+}
+
+.quick-pip-open-main-hint {
+  color:
+    rgba(
+      18,
+      18,
+      18,
+      0.54
+    );
+
+  text-shadow:
+    0 1px 1px
+      rgba(
+        255,
+        255,
+        255,
+        0.45
+      );
+}
+
+/*
+  PiP는 투명 window라 흰 배경 위에서도 식별되어야 한다.
+  흰색 Core identity는 유지하되, PiP에서만 graphite stroke를 겹친다.
+*/
+.pip-mode
+.core-outer-ring {
+  filter:
+    grayscale(1)
+    saturate(0)
+    brightness(1.02)
+    drop-shadow(
+      0 1px 1px
+      rgba(
+        0,
+        0,
+        0,
+        0.34
+      )
+    )
+    drop-shadow(
+      0 0 10px
+      rgba(
+        0,
+        0,
+        0,
+        0.18
+      )
+    );
+}
+
+.pip-mode
+.core-outer-ring::before {
+  border-color:
+    rgba(
+      18,
+      18,
+      18,
+      0.42
+    );
+
+  box-shadow:
+    inset 7px 5px 18px
+      rgba(
+        255,
+        255,
+        255,
+        0.06
+      ),
+    inset -7px -8px 20px
+      rgba(
+        0,
+        0,
+        0,
+        0.08
+      ),
+    0 0 0 1px
+      rgba(
+        255,
+        255,
+        255,
+        0.16
+      ),
+    0 0 18px
+      rgba(
+        0,
+        0,
+        0,
+        0.16
+      );
+}
+
+.pip-mode
+.core-orbit {
+  border-color:
+    rgba(
+      24,
+      24,
+      24,
+      0.58
+    );
+
+  box-shadow:
+    0 0 0 1px
+      rgba(
+        255,
+        255,
+        255,
+        0.26
+      ),
+    0 0 2px
+      rgba(
+        0,
+        0,
+        0,
+        0.44
+      ),
+    0 0 10px
+      rgba(
+        255,
+        255,
+        255,
+        0.14
+      );
+}
+
+.pip-mode
+.core-orbit-b,
+.pip-mode
+.core-orbit-d {
+  border-color:
+    rgba(
+      38,
+      38,
+      38,
+      0.48
+    );
+}
+
+.pip-mode
+.core-energy {
+  box-shadow:
+    0 0 0 1px
+      rgba(
+        18,
+        18,
+        18,
+        0.28
+      ),
+    0 0 42px
+      rgba(
+        255,
+        255,
+        255,
+        0.46
+      ),
+    0 0 70px
+      rgba(
+        0,
+        0,
+        0,
+        0.12
+      );
+}
+
+/* ==================================================
+   Focus
+   ================================================== */
+
+.quick-pip-mini-button:focus-visible,
+.quick-pip-current-step-toggle:focus-visible,
+.command-duration-button:focus-visible,
+.command-action-button:focus-visible,
+.command-check-toggle:focus-visible,
+.command-check-delete:focus-visible,
+.command-add-step button:focus-visible {
+  outline:
+    1px solid
+    rgba(
+      126,
+      219,
+      255,
+      0.72
+    );
+
+  outline-offset: 2px;
+}
+
+/* ==================================================
+   Reduced motion
+   ================================================== */
+
+@media (
+  prefers-reduced-motion:
+  reduce
+) {
+  .core-energy,
+  .core-orbit,
+  .command-panel {
+    animation: none;
+  }
+
+  .quick-pip {
+    transition: none;
+  }
+}
+
+/* ==================================================
+   Dormant Activation Prototype
+
+   현재 App.jsx에는 연결하지 않는다.
+   Activation과 기존 Next Action의 제품 역할이 구분된 뒤
+   prototype 자체를 재설계할 때만 사용한다.
+   ================================================== */
+
+.activation-prototype {
+  position: absolute;
+  inset: 0;
+
+  z-index: 8;
+
+  display: grid;
+  place-items: center;
+
+  pointer-events: auto;
+
+  -webkit-app-region: no-drag;
+}
+
+.activation-prototype-card {
+  width: 238px;
+  min-height: 214px;
+
+  box-sizing: border-box;
+
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+
+  gap: 12px;
+
+  padding:
+    18px
+    16px
+    13px;
+
+  border:
+    1px solid
+    rgba(
+      126,
+      219,
+      255,
+      0.18
+    );
+
+  border-radius: 15px;
+
+  background:
+    linear-gradient(
+      155deg,
+      rgba(
+        8,
+        29,
+        39,
+        0.94
+      ),
+      rgba(
+        2,
+        9,
+        14,
+        0.96
+      )
+    );
+
+  box-shadow:
+    0 18px 36px
+      rgba(
+        0,
+        0,
+        0,
+        0.34
+      ),
+    inset 0 0 20px
+      rgba(
+        67,
+        184,
+        228,
+        0.035
+      );
+
+  backdrop-filter:
+    blur(10px);
+}
+
+.activation-prototype-block {
+  display: flex;
+  flex-direction: column;
+
+  gap: 5px;
+
+  text-align: left;
+}
+
+.activation-prototype-context {
+  color:
+    rgba(
+      126,
+      219,
+      255,
+      0.46
+    );
+
+  font-size: 7px;
+  font-weight: 500;
+
+  letter-spacing: 0.18em;
+}
+
+.activation-prototype-title,
+.activation-prototype-next-action {
+  color:
+    rgba(
+      224,
+      248,
+      255,
+      0.92
+    );
+
+  font-size: 14px;
+  font-weight: 400;
+  line-height: 1.35;
+}
+
+.activation-prototype-next-action {
+  color:
+    rgba(
+      231,
+      250,
+      255,
+      0.98
+    );
+
+  font-size: 15px;
+}
+
+.activation-prototype-divider {
+  height: 1px;
+
+  background:
+    rgba(
+      126,
+      219,
+      255,
+      0.10
+    );
+}
+
+.activation-prototype-next {
+  appearance: none;
+
+  width: 100%;
+
+  margin: 4px 0 0;
+  padding:
+    8px
+    12px;
+
+  border:
+    1px solid
+    rgba(
+      126,
+      219,
+      255,
+      0.40
+    );
+
+  border-radius: 999px;
+
+  background:
+    rgba(
+      35,
+      105,
+      132,
+      0.24
+    );
+
+  color:
+    rgba(
+      228,
+      249,
+      255,
+      0.96
+    );
+
+  font-family: inherit;
+  font-size: 10px;
+
+  cursor: pointer;
+
+  -webkit-app-region: no-drag;
+}
+
+.activation-prototype-exit {
+  appearance: none;
+
+  align-self: center;
+
+  margin: -2px 0 0;
+  padding: 3px 8px;
+
+  border: 0;
+
+  background: transparent;
+
+  color:
+    rgba(
+      174,
+      226,
+      247,
+      0.36
+    );
+
+  font-family: inherit;
+  font-size: 8px;
+
+  cursor: pointer;
+
+  -webkit-app-region: no-drag;
+}
+
+.activation-prototype-next:focus-visible,
+.activation-prototype-exit:focus-visible {
+  outline:
+    1px solid
+    rgba(
+      126,
+      219,
+      255,
+      0.72
+    );
+
+  outline-offset: 2px;
+}
+
+
+
+/* ==================================================
+   System Home / Hierarchy Prototype T1
+
+   큰 목표를 중심에서 보고, 선택하면 더 작은 단위로 내려가는
+   fullscreen 내부 hierarchy skeleton이다.
+   ================================================== */
+
+.fullscreen-prototype-switch {
+  position: absolute;
+  top: 20px;
+  right: 24px;
+  z-index: 12;
+
+  display: flex;
+  align-items: center;
+  gap: 4px;
+
+  padding: 3px;
+
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  border-radius: 999px;
+
+  background: rgba(0, 0, 0, 0.42);
+  backdrop-filter: blur(14px);
+
+  pointer-events: auto;
+  -webkit-app-region: no-drag;
+}
+
+.fullscreen-prototype-switch button {
+  appearance: none;
+
+  padding: 5px 9px;
+
+  border: 0;
+  border-radius: 999px;
+
+  background: transparent;
+  color: rgba(255, 255, 255, 0.34);
+
+  font-family: inherit;
+  font-size: 8px;
+  font-weight: 650;
+  letter-spacing: 0.12em;
+
+  cursor: pointer;
+
+  transition:
+    background 140ms ease-out,
+    color 140ms ease-out;
+}
+
+.fullscreen-prototype-switch button:hover,
+.fullscreen-prototype-switch button:focus-visible {
+  color: rgba(255, 255, 255, 0.86);
+}
+
+.fullscreen-prototype-switch button:focus-visible {
+  outline: 1px solid rgba(255, 255, 255, 0.55);
+  outline-offset: 2px;
+}
+
+.fullscreen-prototype-switch button.is-active {
+  background: rgba(255, 255, 255, 0.10);
+  color: rgba(255, 255, 255, 0.92);
+}
+
+.tree-prototype-interface {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+
+  overflow: hidden;
+
+  color: rgba(255, 255, 255, 0.88);
+
+  perspective: 1300px;
+  perspective-origin: 50% 48%;
+
+  --tree-depth-shift:
+    calc(
+      attr(data-depth number, 0) *
+      -26px
+    );
+
+  pointer-events: none;
+  -webkit-app-region: no-drag;
+}
+
+.tree-prototype-cursor-spotlight {
+  position: absolute;
+  inset: 0;
+  z-index: 9;
+
+  background:
+    radial-gradient(
+      circle
+      150px
+      at
+      var(--tree-spotlight-x, 50%)
+      var(--tree-spotlight-y, 50%),
+      rgba(
+        255,
+        255,
+        255,
+        0.105
+      ),
+      rgba(
+        126,
+        219,
+        255,
+        0.034
+      ) 34%,
+      transparent 70%
+    );
+
+  opacity:
+    var(
+      --tree-spotlight-opacity,
+      0
+    );
+
+  transition:
+    opacity 180ms ease-out;
+
+  pointer-events: none;
+}
+
+.tree-prototype-field {
+  position: absolute;
+  inset: 0;
+
+  background:
+    linear-gradient(
+      115deg,
+      rgba(255, 255, 255, 0.052),
+      rgba(255, 255, 255, 0) 27%,
+      rgba(255, 255, 255, 0.040) 64%,
+      rgba(255, 255, 255, 0)
+    ),
+    radial-gradient(
+      circle at 50% 49%,
+      rgba(255, 255, 255, 0.078) 0%,
+      rgba(255, 255, 255, 0.022) 24%,
+      rgba(255, 255, 255, 0) 62%
+    ),
+    radial-gradient(
+      circle at 50% 50%,
+      rgba(126, 219, 255, 0.055),
+      rgba(126, 219, 255, 0) 34%
+    );
+
+  opacity: 0.9;
+  pointer-events: none;
+
+  transform-style: preserve-3d;
+}
+
+.tree-prototype-field::before,
+.tree-prototype-field::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 50%;
+
+  border: 1px solid rgba(255, 255, 255, 0.060);
+  border-radius: 50%;
+
+  transform: translate(-50%, -50%) rotateX(70deg);
+}
+
+.tree-prototype-field::before {
+  width: min(70vw, 1060px);
+  height: min(42vw, 640px);
+
+  box-shadow:
+    0 0 80px
+      rgba(255, 255, 255, 0.030),
+    inset 0 0 90px
+      rgba(126, 219, 255, 0.025);
+
+  animation:
+    tree-field-precess
+    18s
+    ease-in-out
+    infinite;
+}
+
+.tree-prototype-field::after {
+  width: min(52vw, 780px);
+  height: min(31vw, 470px);
+  transform: translate(-50%, -50%) rotateX(67deg) rotateZ(28deg);
+
+  animation:
+    tree-field-counter-precess
+    22s
+    ease-in-out
+    infinite;
+}
+
+.tree-prototype-space {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+
+  pointer-events: none;
+  transform-style: preserve-3d;
+}
+
+.tree-prototype-space span {
+  position: absolute;
+  left: var(--space-x);
+  top: var(--space-y);
+
+  width: 2px;
+  height: 2px;
+
+  border-radius: 50%;
+
+  background:
+    rgba(
+      255,
+      255,
+      255,
+      0.78
+    );
+
+  box-shadow:
+    0 0 10px
+      rgba(
+        126,
+        219,
+        255,
+        0.42
+      );
+
+  opacity: 0.28;
+
+  transform:
+    translateZ(var(--space-z))
+    scale(var(--space-scale));
+
+  animation:
+    tree-space-pulse
+    3.8s
+    ease-in-out
+    infinite;
+
+  animation-delay:
+    var(--space-delay);
+}
+
+.tree-prototype-depth-field {
+  position: absolute;
+  inset: 0;
+
+  z-index: 1;
+
+  transform-style: preserve-3d;
+
+  pointer-events: none;
+}
+
+.tree-prototype-depth-ring {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+
+  width:
+    calc(
+      190px +
+      var(--depth-index) *
+      150px
+    );
+
+  height:
+    calc(
+      112px +
+      var(--depth-index) *
+      88px
+    );
+
+  border:
+    1px solid
+    rgba(
+      255,
+      255,
+      255,
+      0.07
+    );
+
+  border-radius: 50%;
+
+  translate: -50% -50%;
+
+  transform:
+    rotateX(68deg)
+    rotateZ(
+      calc(
+        var(--depth-index) *
+        13deg
+      )
+    )
+    translateZ(
+      calc(
+        var(--depth-index) *
+        -32px
+      )
+    );
+
+  box-shadow:
+    0 0 18px
+      rgba(
+        255,
+        255,
+        255,
+        0.025
+      );
+
+  animation:
+    tree-depth-ring-breathe
+    5.6s
+    ease-in-out
+    infinite;
+
+  animation-delay:
+    calc(
+      var(--depth-index) *
+      0.18s
+    );
+}
+
+.tree-prototype-branch-field {
+  /*
+    Current renderer shows only the current node's immediate children.
+    That is not enough to honestly communicate a full radial tree, so the
+    decorative Core-to-child beams are hidden for the clean carousel pass.
+
+    The DOM is intentionally kept so a future full graph renderer can restore
+    explicit depth-weighted branch lines without rebuilding TreePrototype.
+  */
+  display: none;
+}
+
+.tree-prototype-branch-line {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+
+  width: clamp(230px, 27vw, 430px);
+  height: 1px;
+
+  transform-origin: 0 50%;
+
+  background:
+    linear-gradient(
+      90deg,
+      rgba(255, 255, 255, 0),
+      rgba(255, 255, 255, 0.08) 18%,
+      rgba(126, 219, 255, 0.22) 48%,
+      rgba(255, 255, 255, 0.12) 70%,
+      rgba(255, 255, 255, 0)
+    );
+
+  box-shadow:
+    0 0 22px
+      rgba(
+        126,
+        219,
+        255,
+        0.13
+      );
+
+  opacity: 0;
+
+  transform:
+    rotate(var(--branch-rotate))
+    rotateX(68deg)
+    translateZ(-46px)
+    scaleX(0.2);
+
+  animation:
+    tree-branch-draw
+    680ms
+    cubic-bezier(
+      0.22,
+      1,
+      0.36,
+      1
+    )
+    forwards,
+    tree-branch-flow
+    2.8s
+    ease-in-out
+    infinite;
+
+  animation-delay:
+    var(--branch-delay),
+    calc(
+      var(--branch-delay) +
+      680ms
+    );
+}
+
+.tree-prototype-branch-line-0 {
+  translate: 34px -2px;
+}
+
+.tree-prototype-branch-line-1 {
+  translate: 22px -8px;
+}
+
+.tree-prototype-branch-line-2 {
+  translate: 18px 8px;
+}
+
+.tree-prototype-branch-line-3 {
+  translate: 30px 4px;
+}
+
+.tree-prototype-context {
+  position: absolute;
+  top: clamp(38px, 6vh, 70px);
+  left: 50%;
+  z-index: 5;
+
+  width: min(720px, 70vw);
+
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+
+  translate: -50% 0;
+
+  text-align: center;
+  pointer-events: auto;
+}
+
+.tree-prototype-kicker {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+
+  color: rgba(255, 255, 255, 0.48);
+
+  font-size: 9px;
+  font-weight: 650;
+  letter-spacing: 0.16em;
+}
+
+.tree-prototype-breadcrumb {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 3px;
+}
+
+.tree-prototype-breadcrumb-part {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+
+  color: rgba(255, 255, 255, 0.24);
+}
+
+.tree-prototype-breadcrumb-part button {
+  appearance: none;
+
+  padding: 2px 3px;
+  border: 0;
+
+  background: transparent;
+  color: rgba(255, 255, 255, 0.52);
+
+  font-family: inherit;
+  font-size: 10px;
+
+  cursor: pointer;
+}
+
+.tree-prototype-breadcrumb-part:last-child button {
+  color: rgba(255, 255, 255, 0.90);
+}
+
+.tree-prototype-breadcrumb-part button:hover {
+  color: rgba(255, 255, 255, 1);
+}
+
+.tree-prototype-parent,
+.tree-prototype-open-execution {
+  appearance: none;
+  position: absolute;
+  z-index: 6;
+
+  display: flex;
+  align-items: center;
+  gap: 7px;
+
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 999px;
+
+  background: rgba(0, 0, 0, 0.34);
+  color: rgba(255, 255, 255, 0.60);
+
+  font-family: inherit;
+  font-size: 9px;
+  font-weight: 650;
+  letter-spacing: 0.09em;
+
+  backdrop-filter: blur(12px);
+
+  cursor: pointer;
+  pointer-events: auto;
+  -webkit-app-region: no-drag;
+}
+
+.tree-prototype-parent {
+  top: clamp(88px, 12vh, 128px);
+  left: clamp(24px, 4vw, 64px);
+  padding: 7px 11px;
+}
+
+.tree-prototype-open-execution {
+  left: 50%;
+  bottom: clamp(26px, 5vh, 54px);
+
+  padding: 8px 13px;
+
+  translate: -50% 0;
+}
+
+.tree-prototype-parent:hover,
+.tree-prototype-open-execution:hover {
+  border-color: rgba(255, 255, 255, 0.28);
+  color: rgba(255, 255, 255, 0.94);
+}
+
+.tree-prototype-current {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  z-index: 3;
+
+  width: min(390px, 32vw);
+
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 7px;
+
+  translate: -50% -50%;
+
+  transform-style: preserve-3d;
+
+  text-align: center;
+  pointer-events: none;
+}
+
+.tree-prototype-current-silent-label {
+  position: absolute;
+
+  width: 1px;
+  height: 1px;
+
+  overflow: hidden;
+
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+.tree-prototype-core-anchor {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  z-index: -1;
+
+  width: 220px;
+  height: 220px;
+
+  translate: -50% -50%;
+
+  pointer-events: none;
+  transform-style: preserve-3d;
+}
+
+.tree-prototype-core-anchor span {
+  position: absolute;
+  inset: 50%;
+
+  width: 92px;
+  height: 92px;
+
+  border:
+    1px solid
+    rgba(
+      255,
+      255,
+      255,
+      0.13
+    );
+
+  border-radius: 50%;
+
+  translate: -50% -50%;
+
+  box-shadow:
+    0 0 28px
+      rgba(
+        126,
+        219,
+        255,
+        0.12
+      ),
+    inset 0 0 22px
+      rgba(
+        255,
+        255,
+        255,
+        0.035
+      );
+
+  animation:
+    tree-core-anchor-pulse
+    2.7s
+    ease-in-out
+    infinite;
+}
+
+.tree-prototype-core-anchor span:nth-child(2) {
+  width: 150px;
+  height: 150px;
+
+  opacity: 0.64;
+
+  animation-delay: 0.28s;
+}
+
+.tree-prototype-core-anchor span:nth-child(3) {
+  width: 214px;
+  height: 214px;
+
+  opacity: 0.34;
+
+  animation-delay: 0.56s;
+}
+
+.tree-prototype-current-eyebrow,
+.tree-prototype-node-eyebrow {
+  color: rgba(255, 255, 255, 0.34);
+
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+}
+
+.tree-prototype-current h1 {
+  margin: 0;
+
+  color: rgba(255, 255, 255, 0.96);
+
+  font-size: clamp(28px, 3.1vw, 48px);
+  font-weight: 540;
+  line-height: 1.02;
+  letter-spacing: 0;
+
+  text-shadow:
+    0 18px 60px
+      rgba(
+        255,
+        255,
+        255,
+        0.14
+      );
+}
+
+.tree-prototype-current p {
+  max-width: 330px;
+  margin: 0;
+
+  color: rgba(255, 255, 255, 0.38);
+
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.tree-prototype-preview-text {
+  max-width: 310px;
+  min-height: 34px;
+
+  margin: 2px 0 0;
+
+  color:
+    rgba(
+      255,
+      255,
+      255,
+      0.46
+    );
+
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.tree-prototype-node-health {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 5px;
+
+  margin-top: 2px;
+}
+
+.tree-prototype-node-health span {
+  padding:
+    4px
+    7px;
+
+  border:
+    1px solid
+    rgba(
+      255,
+      255,
+      255,
+      0.09
+    );
+
+  border-radius: 999px;
+
+  background:
+    rgba(
+      0,
+      0,
+      0,
+      0.22
+    );
+
+  color:
+    rgba(
+      255,
+      255,
+      255,
+      0.38
+    );
+
+  font-size: 7.5px;
+  font-weight: 700;
+  letter-spacing: 0.10em;
+}
+
+.tree-prototype-depth-label {
+  margin-top: 4px;
+  padding:
+    4px 8px;
+
+  border:
+    1px solid
+    rgba(
+      255,
+      255,
+      255,
+      0.10
+    );
+
+  border-radius: 999px;
+
+  background:
+    rgba(
+      0,
+      0,
+      0,
+      0.24
+    );
+
+  color:
+    rgba(
+      255,
+      255,
+      255,
+      0.34
+    );
+
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+}
+
+.tree-prototype-children {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+
+  pointer-events: none;
+
+  transform-style: preserve-3d;
+
+  transition:
+    filter 260ms ease-out,
+    opacity 260ms ease-out;
+}
+
+.tree-prototype-carousel {
+  /*
+    Reference-video direction: a stable horizontal carousel.
+    Cards move only when focus changes; there is no edge fade mask and no
+    perpetual orbital drift.
+  */
+  overflow: hidden;
+
+  perspective: 1200px;
+  perspective-origin: 50% 48%;
+}
+
+.tree-prototype-interface[data-preview-active="true"]
+.tree-prototype-field {
+  filter:
+    brightness(1.14)
+    saturate(1.18);
+}
+
+.tree-prototype-node {
+  appearance: none;
+  position: absolute;
+
+  width: clamp(210px, 19vw, 292px);
+  min-height: 138px;
+
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 7px;
+
+  padding: 15px 16px;
+
+  border: 1px solid rgba(255, 255, 255, 0.095);
+  border-radius: 18px;
+
+  background:
+    linear-gradient(
+      145deg,
+      rgba(255, 255, 255, 0.068),
+      rgba(255, 255, 255, 0.01)
+    ),
+    radial-gradient(
+      circle at 18% 0%,
+      rgba(126, 219, 255, 0.10),
+      rgba(126, 219, 255, 0) 46%
+    ),
+    rgba(2, 2, 2, 0.48);
+
+  box-shadow:
+    0 34px 90px rgba(0, 0, 0, 0.42),
+    0 0 44px rgba(126, 219, 255, 0.055),
+    inset 0 1px 0 rgba(255, 255, 255, 0.040);
+
+  color: rgba(255, 255, 255, 0.70);
+  text-align: left;
+
+  backdrop-filter: blur(18px);
+
+  cursor: pointer;
+  pointer-events: auto;
+  -webkit-app-region: no-drag;
+
+  transform-style: preserve-3d;
+
+  overflow: hidden;
+}
+
+.tree-prototype-children
+.tree-prototype-node {
+  left: 50%;
+  top: 50%;
+  right: auto;
+  bottom: auto;
+
+  margin-left:
+    clamp(
+      -146px,
+      -9.5vw,
+      -105px
+    );
+
+  margin-top: -69px;
+}
+
+.tree-prototype-node.is-far-carousel {
+  border-color:
+    rgba(
+      255,
+      255,
+      255,
+      0.075
+    );
+}
+
+.tree-prototype-node.is-side-carousel {
+  border-color:
+    rgba(
+      255,
+      255,
+      255,
+      0.13
+    );
+}
+
+.tree-prototype-node.is-focused-carousel {
+  border-color:
+    rgba(
+      255,
+      255,
+      255,
+      0.30
+    );
+
+  box-shadow:
+    0 40px 110px
+      rgba(
+        0,
+        0,
+        0,
+        0.50
+      ),
+    0 0 60px
+      rgba(
+        126,
+        219,
+        255,
+        0.12
+      ),
+    inset 0 1px 0
+      rgba(
+        255,
+        255,
+        255,
+        0.07
+      );
+}
+
+.tree-prototype-node.is-far-carousel
+.tree-prototype-node-description {
+  opacity: 0.72;
+}
+
+.tree-prototype-node.is-side-carousel
+.tree-prototype-node-description {
+  opacity: 0.86;
+}
+
+.tree-prototype-node:hover,
+.tree-prototype-node:focus-visible {
+  border-color: rgba(255, 255, 255, 0.24);
+  background:
+    linear-gradient(
+      145deg,
+      rgba(255, 255, 255, 0.075),
+      rgba(255, 255, 255, 0.018)
+    ),
+    rgba(3, 3, 3, 0.58);
+}
+
+.tree-prototype-node.is-complete {
+  border-color:
+    rgba(
+      255,
+      255,
+      255,
+      0.22
+    );
+
+  background:
+    linear-gradient(
+      145deg,
+      rgba(255, 255, 255, 0.08),
+      rgba(255, 255, 255, 0.018)
+    ),
+    rgba(2, 2, 2, 0.56);
+}
+
+.tree-prototype-node.is-complete strong {
+  color:
+    rgba(
+      255,
+      255,
+      255,
+      0.66
+    );
+}
+
+.tree-prototype-node::before {
+  content: '';
+
+  position: absolute;
+  inset: -1px;
+
+  border-radius: inherit;
+
+  background:
+    radial-gradient(
+      circle at 50% 0%,
+      rgba(255, 255, 255, 0.12),
+      transparent 48%
+    );
+
+  opacity: 0;
+
+  pointer-events: none;
+
+  transition:
+    opacity 180ms ease-out;
+}
+
+.tree-prototype-node::after {
+  content: '';
+
+  position: absolute;
+  inset: 0;
+
+  border-radius: inherit;
+
+  background:
+    linear-gradient(
+      120deg,
+      rgba(255, 255, 255, 0),
+      rgba(255, 255, 255, 0.12),
+      rgba(255, 255, 255, 0)
+    );
+
+  opacity: 0;
+
+  transform:
+    translateX(-130%);
+
+  pointer-events: none;
+
+  transition:
+    opacity 180ms ease-out,
+    transform 520ms
+      cubic-bezier(
+        0.22,
+        1,
+        0.36,
+        1
+      );
+}
+
+.tree-prototype-node:hover::before,
+.tree-prototype-node:focus-visible::before {
+  opacity: 1;
+}
+
+.tree-prototype-node:hover::after,
+.tree-prototype-node:focus-visible::after {
+  opacity: 0.56;
+
+  transform:
+    translateX(130%);
+}
+
+.tree-prototype-node-energy {
+  position: absolute;
+  left: 14px;
+  right: 14px;
+  top: 0;
+
+  height: 1px;
+
+  background:
+    linear-gradient(
+      90deg,
+      rgba(255, 255, 255, 0),
+      rgba(126, 219, 255, 0.58),
+      rgba(255, 255, 255, 0)
+    );
+
+  opacity: 0.36;
+
+  box-shadow:
+    0 0 16px
+      rgba(
+        126,
+        219,
+        255,
+        0.22
+      );
+}
+
+.tree-prototype-node:focus-visible {
+  outline: 1px solid rgba(255, 255, 255, 0.55);
+  outline-offset: 3px;
+}
+
+.tree-prototype-node strong {
+  color: rgba(255, 255, 255, 0.90);
+
+  font-size: 16px;
+  font-weight: 560;
+  line-height: 1.15;
+}
+
+.tree-prototype-node-description {
+  color: rgba(255, 255, 255, 0.38);
+
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.tree-prototype-node-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+
+  color:
+    rgba(
+      255,
+      255,
+      255,
+      0.28
+    );
+
+  font-size: 8px;
+  font-weight: 650;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.tree-prototype-node-enter {
+  margin-top: auto;
+
+  display: flex;
+  align-items: center;
+  gap: 4px;
+
+  color: rgba(255, 255, 255, 0.30);
+
+  font-size: 8px;
+  font-weight: 650;
+  letter-spacing: 0.10em;
+}
+
+.tree-prototype-node-0 {
+  left: clamp(36px, 6vw, 110px);
+  top:
+    calc(
+      50% - 69px
+    );
+
+  transform:
+    rotateY(14deg)
+    translateZ(36px);
+}
+
+.tree-prototype-node-1 {
+  right: clamp(42px, 7vw, 132px);
+  top: clamp(130px, 21vh, 218px);
+
+  transform:
+    rotateY(-17deg)
+    rotateX(4deg)
+    translateZ(8px);
+}
+
+.tree-prototype-node-2 {
+  right: clamp(42px, 8vw, 150px);
+  bottom: clamp(108px, 18vh, 184px);
+
+  transform:
+    rotateY(-13deg)
+    rotateX(-5deg)
+    translateZ(-18px);
+}
+
+.tree-prototype-node-3 {
+  left: clamp(50px, 9vw, 166px);
+  bottom: clamp(94px, 16vh, 164px);
+
+  transform:
+    rotateY(12deg)
+    rotateX(-4deg)
+    translateZ(-6px);
+}
+
+.tree-prototype-children
+.tree-prototype-node-0,
+.tree-prototype-children
+.tree-prototype-node-1,
+.tree-prototype-children
+.tree-prototype-node-2,
+.tree-prototype-children
+.tree-prototype-node-3 {
+  left: 50%;
+  top: 50%;
+  right: auto;
+  bottom: auto;
+}
+
+.tree-carousel-arrow {
+  appearance: none;
+
+  position: absolute;
+  top: 50%;
+  z-index: 9;
+
+  width: 38px;
+  height: 38px;
+
+  display: grid;
+  place-items: center;
+
+  border:
+    1px solid
+    rgba(
+      255,
+      255,
+      255,
+      0.16
+    );
+
+  border-radius: 999px;
+
+  background:
+    linear-gradient(
+      180deg,
+      rgba(
+        255,
+        255,
+        255,
+        0.12
+      ),
+      rgba(
+        255,
+        255,
+        255,
+        0.035
+      )
+    ),
+    rgba(
+      0,
+      0,
+      0,
+      0.40
+    );
+
+  color:
+    rgba(
+      255,
+      255,
+      255,
+      0.74
+    );
+
+  font-family:
+    ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    Consolas,
+    monospace;
+  font-size: 20px;
+  font-weight: 400;
+
+  backdrop-filter: blur(16px);
+  box-shadow:
+    0 20px 55px
+      rgba(
+        0,
+        0,
+        0,
+        0.32
+      );
+
+  cursor: pointer;
+  pointer-events: auto;
+  -webkit-app-region: no-drag;
+
+  translate: 0 -50%;
+
+  transition:
+    border-color 140ms ease-out,
+    background 140ms ease-out,
+    color 140ms ease-out,
+    transform 140ms ease-out;
+}
+
+.tree-carousel-arrow:hover,
+.tree-carousel-arrow:focus-visible {
+  border-color:
+    rgba(
+      255,
+      255,
+      255,
+      0.36
+    );
+
+  background:
+    rgba(
+      255,
+      255,
+      255,
+      0.13
+    );
+
+  color:
+    rgba(
+      255,
+      255,
+      255,
+      0.96
+    );
+
+  transform:
+    scale(1.04);
+}
+
+.tree-carousel-arrow:focus-visible {
+  outline:
+    1px solid
+    rgba(
+      255,
+      255,
+      255,
+      0.58
+    );
+
+  outline-offset: 3px;
+}
+
+.tree-carousel-arrow-left {
+  left: clamp(24px, 4vw, 64px);
+}
+
+.tree-carousel-arrow-right {
+  right: clamp(24px, 4vw, 64px);
+}
+
+.tree-carousel-ghost-layer {
+  position: absolute;
+  inset: 0;
+
+  z-index: 1;
+
+  pointer-events: none;
+
+  transform-style:
+    preserve-3d;
+}
+
+.tree-carousel-ghost-card {
+  position: absolute;
+
+  left: 50%;
+  top: 50%;
+
+  width:
+    clamp(
+      300px,
+      29vw,
+      410px
+    );
+
+  height: 170px;
+
+  margin-left:
+    clamp(
+      -205px,
+      -14.5vw,
+      -150px
+    );
+
+  margin-top: -85px;
+
+  border:
+    1px solid
+    rgba(
+      255,
+      255,
+      255,
+      0.32
+    );
+
+  border-radius: 14px;
+
+  background:
+    rgba(
+      255,
+      255,
+      255,
+      0.08
+    );
+
+  box-shadow:
+    0 0 24px
+      rgba(
+        255,
+        255,
+        255,
+        0.05
+      ),
+    0 20px 70px
+      rgba(
+        0,
+        0,
+        0,
+        0.28
+      );
+
+  backdrop-filter:
+    blur(4px);
+}
+
+.tree-prototype-children.is-empty {
+  display: grid;
+  place-items: center;
+}
+
+.tree-prototype-leaf {
+  position: absolute;
+  left: 50%;
+  top: calc(50% + 112px);
+
+  width: min(330px, 60vw);
+
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+
+  translate: -50% 0;
+
+  text-align: center;
+  pointer-events: none;
+}
+
+.tree-prototype-leaf span {
+  color: rgba(255, 255, 255, 0.24);
+
+  font-size: 8px;
+  letter-spacing: 0.13em;
+}
+
+.tree-prototype-leaf strong {
+  color: rgba(255, 255, 255, 0.46);
+
+  font-size: 10px;
+  font-weight: 450;
+}
+
+.tree-prototype-map {
+  position: absolute;
+  left: clamp(22px, 3vw, 42px);
+  bottom: clamp(24px, 4vh, 48px);
+  z-index: 6;
+
+  width: min(250px, 24vw);
+
+  padding: 12px 13px;
+
+  border: 1px solid rgba(255, 255, 255, 0.10);
+  border-radius: 14px;
+
+  background:
+    linear-gradient(
+      145deg,
+      rgba(255, 255, 255, 0.045),
+      rgba(255, 255, 255, 0.010)
+    ),
+    rgba(0, 0, 0, 0.38);
+
+  backdrop-filter: blur(16px);
+
+  color: rgba(255, 255, 255, 0.52);
+
+  pointer-events: auto;
+  -webkit-app-region: no-drag;
+}
+
+.tree-prototype-map-title {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+
+  color: rgba(255, 255, 255, 0.36);
+
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+}
+
+.tree-prototype-map-path {
+  position: relative;
+
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+
+  margin-top: 10px;
+}
+
+.tree-prototype-map-path::before {
+  content: '';
+
+  position: absolute;
+  left: 5px;
+  top: 8px;
+  bottom: 8px;
+
+  width: 1px;
+
+  background:
+    rgba(255, 255, 255, 0.10);
+}
+
+.tree-prototype-map-path button {
+  appearance: none;
+
+  position: relative;
+
+  min-width: 0;
+
+  padding:
+    3px 0
+    3px 18px;
+
+  border: 0;
+
+  background: transparent;
+
+  color: rgba(255, 255, 255, 0.42);
+
+  font-family: inherit;
+  font-size: 10px;
+  line-height: 1.25;
+  text-align: left;
+
+  cursor: pointer;
+}
+
+.tree-prototype-map-path button::before {
+  content: '';
+
+  position: absolute;
+  left: 2px;
+  top: 50%;
+
+  width: 7px;
+  height: 7px;
+
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  border-radius: 50%;
+
+  background: #050505;
+
+  transform: translateY(-50%);
+}
+
+.tree-prototype-map-path button:hover,
+.tree-prototype-map-path button.is-active {
+  color: rgba(255, 255, 255, 0.88);
+}
+
+.tree-prototype-map-path button.is-active::before {
+  border-color: rgba(255, 255, 255, 0.70);
+  background: rgba(255, 255, 255, 0.82);
+}
+
+.tree-prototype-overview {
+  position: absolute;
+  right: clamp(22px, 3vw, 42px);
+  bottom: clamp(24px, 4vh, 48px);
+  z-index: 6;
+
+  width: min(280px, 26vw);
+  height: min(220px, 24vh);
+
+  border:
+    1px solid
+    rgba(
+      255,
+      255,
+      255,
+      0.10
+    );
+
+  border-radius: 18px;
+
+  background:
+    linear-gradient(
+      145deg,
+      rgba(255, 255, 255, 0.045),
+      rgba(255, 255, 255, 0.010)
+    ),
+    rgba(0, 0, 0, 0.34);
+
+  backdrop-filter:
+    blur(16px);
+
+  overflow: hidden;
+
+  pointer-events: auto;
+  -webkit-app-region: no-drag;
+}
+
+.tree-prototype-overview-title {
+  position: absolute;
+  left: 13px;
+  top: 12px;
+
+  display: flex;
+  align-items: center;
+  gap: 7px;
+
+  color:
+    rgba(
+      255,
+      255,
+      255,
+      0.36
+    );
+
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+}
+
+.tree-prototype-overview-core {
+  position: absolute;
+  left: 50%;
+  top: 54%;
+
+  width: 54px;
+  height: 54px;
+
+  display: grid;
+  place-items: center;
+
+  border:
+    1px solid
+    rgba(
+      255,
+      255,
+      255,
+      0.28
+    );
+
+  border-radius: 50%;
+
+  background:
+    radial-gradient(
+      circle,
+      rgba(255, 255, 255, 0.18),
+      rgba(255, 255, 255, 0.03) 58%,
+      transparent
+    );
+
+  color:
+    rgba(
+      255,
+      255,
+      255,
+      0.72
+    );
+
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+
+  translate: -50% -50%;
+
+  box-shadow:
+    0 0 28px
+      rgba(
+        126,
+        219,
+        255,
+        0.13
+      );
+}
+
+.tree-prototype-overview-branches {
+  position: absolute;
+  inset: 0;
+}
+
+.tree-prototype-overview-branch {
+  appearance: none;
+
+  position: absolute;
+
+  max-width: 96px;
+
+  padding:
+    5px 7px;
+
+  border:
+    1px solid
+    rgba(
+      255,
+      255,
+      255,
+      0.11
+    );
+
+  border-radius: 999px;
+
+  background:
+    rgba(
+      0,
+      0,
+      0,
+      0.34
+    );
+
+  color:
+    rgba(
+      255,
+      255,
+      255,
+      0.46
+    );
+
+  font-family: inherit;
+  font-size: 8px;
+  line-height: 1.15;
+
+  cursor: pointer;
+}
+
+.tree-prototype-overview-branch:hover,
+.tree-prototype-overview-branch.is-active {
+  border-color:
+    rgba(
+      255,
+      255,
+      255,
+      0.34
+    );
+
+  color:
+    rgba(
+      255,
+      255,
+      255,
+      0.86
+    );
+}
+
+.tree-prototype-overview-branch-0 {
+  left: 50%;
+  top: 30px;
+
+  translate: -50% 0;
+}
+
+.tree-prototype-overview-branch-1 {
+  right: 16px;
+  top: 48%;
+}
+
+.tree-prototype-overview-branch-2 {
+  left: 50%;
+  bottom: 18px;
+
+  translate: -50% 0;
+}
+
+.tree-prototype-overview-branch-3 {
+  left: 16px;
+  top: 48%;
+}
+
+.tree-prototype-editor {
+  position: absolute;
+  right: clamp(22px, 3vw, 42px);
+  top: clamp(92px, 13vh, 138px);
+  z-index: 7;
+
+  width: min(300px, 27vw);
+
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+
+  pointer-events: auto;
+  -webkit-app-region: no-drag;
+}
+
+.tree-prototype-edit-form,
+.tree-prototype-add-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+
+  padding: 13px;
+
+  border:
+    1px solid
+    rgba(
+      255,
+      255,
+      255,
+      0.10
+    );
+
+  border-radius: 16px;
+
+  background:
+    linear-gradient(
+      145deg,
+      rgba(255, 255, 255, 0.055),
+      rgba(255, 255, 255, 0.012)
+    ),
+    rgba(
+      0,
+      0,
+      0,
+      0.42
+    );
+
+  box-shadow:
+    0 28px 72px
+      rgba(
+        0,
+        0,
+        0,
+        0.34
+      ),
+    inset 0 1px 0
+      rgba(
+        255,
+        255,
+        255,
+        0.035
+      );
+
+  backdrop-filter: blur(18px);
+}
+
+.tree-prototype-editor-title {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+
+  color:
+    rgba(
+      255,
+      255,
+      255,
+      0.42
+    );
+
+  font-size: 8px;
+  font-weight: 750;
+  letter-spacing: 0.14em;
+}
+
+.tree-prototype-edit-form input,
+.tree-prototype-edit-form textarea,
+.tree-prototype-edit-form select,
+.tree-prototype-add-form input,
+.tree-prototype-add-form textarea,
+.tree-prototype-add-form select {
+  width: 100%;
+
+  box-sizing: border-box;
+
+  border:
+    1px solid
+    rgba(
+      255,
+      255,
+      255,
+      0.10
+    );
+
+  border-radius: 10px;
+
+  background:
+    rgba(
+      0,
+      0,
+      0,
+      0.28
+    );
+
+  color:
+    rgba(
+      255,
+      255,
+      255,
+      0.84
+    );
+
+  font-family: inherit;
+  font-size: 10px;
+  line-height: 1.35;
+
+  outline: none;
+
+  transition:
+    border-color 140ms ease-out,
+    background 140ms ease-out,
+    box-shadow 140ms ease-out;
+}
+
+.tree-prototype-edit-form input,
+.tree-prototype-add-form input,
+.tree-prototype-edit-form select,
+.tree-prototype-add-form select {
+  height: 31px;
+
+  padding:
+    0
+    9px;
+}
+
+.tree-prototype-edit-form textarea,
+.tree-prototype-add-form textarea {
+  min-height: 54px;
+  max-height: 92px;
+
+  resize: vertical;
+
+  padding:
+    8px
+    9px;
+}
+
+.tree-prototype-edit-form input:focus,
+.tree-prototype-edit-form textarea:focus,
+.tree-prototype-edit-form select:focus,
+.tree-prototype-add-form input:focus,
+.tree-prototype-add-form textarea:focus,
+.tree-prototype-add-form select:focus {
+  border-color:
+    rgba(
+      255,
+      255,
+      255,
+      0.34
+    );
+
+  background:
+    rgba(
+      0,
+      0,
+      0,
+      0.38
+    );
+
+  box-shadow:
+    0 0 0 3px
+      rgba(
+        255,
+        255,
+        255,
+        0.055
+      );
+}
+
+.tree-prototype-edit-form option,
+.tree-prototype-add-form option {
+  background: #080808;
+  color: rgba(255, 255, 255, 0.86);
+}
+
+.tree-prototype-editor-actions,
+.tree-prototype-add-row {
+  display: grid;
+  grid-template-columns:
+    repeat(
+      3,
+      minmax(0, 1fr)
+    );
+  gap: 6px;
+}
+
+.tree-prototype-add-row {
+  grid-template-columns:
+    minmax(0, 1fr)
+    auto;
+}
+
+.tree-prototype-editor-actions button,
+.tree-prototype-add-row button {
+  appearance: none;
+
+  min-width: 0;
+  height: 30px;
+
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+
+  border:
+    1px solid
+    rgba(
+      255,
+      255,
+      255,
+      0.13
+    );
+
+  border-radius: 999px;
+
+  background:
+    rgba(
+      255,
+      255,
+      255,
+      0.055
+    );
+
+  color:
+    rgba(
+      255,
+      255,
+      255,
+      0.66
+    );
+
+  font-family: inherit;
+  font-size: 8px;
+  font-weight: 750;
+  letter-spacing: 0.09em;
+
+  cursor: pointer;
+
+  transition:
+    border-color 140ms ease-out,
+    background 140ms ease-out,
+    color 140ms ease-out,
+    transform 140ms ease-out;
+}
+
+.tree-prototype-editor-actions button:hover,
+.tree-prototype-add-row button:hover,
+.tree-prototype-editor-actions button:focus-visible,
+.tree-prototype-add-row button:focus-visible {
+  border-color:
+    rgba(
+      255,
+      255,
+      255,
+      0.30
+    );
+
+  background:
+    rgba(
+      255,
+      255,
+      255,
+      0.11
+    );
+
+  color:
+    rgba(
+      255,
+      255,
+      255,
+      0.94
+    );
+
+  transform:
+    translateY(-1px);
+}
+
+.tree-prototype-editor-actions button:focus-visible,
+.tree-prototype-add-row button:focus-visible {
+  outline:
+    1px solid
+    rgba(
+      255,
+      255,
+      255,
+      0.55
+    );
+
+  outline-offset: 2px;
+}
+
+.tree-prototype-editor-actions button:disabled {
+  opacity: 0.32;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.tree-prototype-node-0 {
+  animation:
+    tree-node-orbit-a
+    7.8s
+    ease-in-out
+    infinite;
+}
+
+.tree-prototype-node-1 {
+  animation:
+    tree-node-orbit-b
+    8.4s
+    ease-in-out
+    infinite;
+}
+
+.tree-prototype-node-2 {
+  animation:
+    tree-node-orbit-c
+    9s
+    ease-in-out
+    infinite;
+}
+
+.tree-prototype-node-3 {
+  animation:
+    tree-node-orbit-d
+    8.8s
+    ease-in-out
+    infinite;
+}
+
+.tree-prototype-overview {
+  height: min(310px, 36vh);
+}
+
+.tree-prototype-overview-search {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  top: 42px;
+  z-index: 2;
+
+  height: 26px;
+
+  display: flex;
+  align-items: center;
+  gap: 6px;
+
+  padding:
+    0
+    8px;
+
+  border:
+    1px solid
+    rgba(
+      255,
+      255,
+      255,
+      0.10
+    );
+
+  border-radius: 999px;
+
+  background:
+    rgba(
+      0,
+      0,
+      0,
+      0.28
+    );
+
+  color:
+    rgba(
+      255,
+      255,
+      255,
+      0.38
+    );
+}
+
+.tree-prototype-overview-search input {
+  min-width: 0;
+  flex: 1;
+
+  border: 0;
+  outline: 0;
+
+  background: transparent;
+  color:
+    rgba(
+      255,
+      255,
+      255,
+      0.78
+    );
+
+  font-family: inherit;
+  font-size: 9px;
+}
+
+.tree-prototype-overview-list {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: 12px;
+  top: 78px;
+  z-index: 3;
+
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+
+  overflow: auto;
+
+  padding-right: 3px;
+
+  mask-image:
+    linear-gradient(
+      to bottom,
+      transparent,
+      black 12px,
+      black calc(100% - 18px),
+      transparent
+    );
+}
+
+.tree-prototype-overview-list button {
+  appearance: none;
+
+  min-height: 20px;
+
+  display: flex;
+  align-items: center;
+  gap: 6px;
+
+  padding:
+    3px
+    6px
+    3px
+    calc(
+      6px +
+      var(--map-depth) *
+      10px
+    );
+
+  border:
+    1px solid
+    transparent;
+
+  border-radius: 7px;
+
+  background:
+    transparent;
+
+  color:
+    rgba(
+      255,
+      255,
+      255,
+      0.42
+    );
+
+  font-family: inherit;
+  font-size: 9px;
+  line-height: 1.2;
+  text-align: left;
+
+  cursor: pointer;
+}
+
+.tree-prototype-overview-list button span {
+  width: 5px;
+  height: 5px;
+
+  flex: 0 0 auto;
+
+  border-radius: 50%;
+
+  background:
+    rgba(
+      255,
+      255,
+      255,
+      0.20
+    );
+}
+
+.tree-prototype-overview-list button:hover,
+.tree-prototype-overview-list button.is-descendant {
+  color:
+    rgba(
+      255,
+      255,
+      255,
+      0.72
+    );
+
+  background:
+    rgba(
+      255,
+      255,
+      255,
+      0.045
+    );
+}
+
+.tree-prototype-overview-list button.is-active {
+  border-color:
+    rgba(
+      255,
+      255,
+      255,
+      0.24
+    );
+
+  background:
+    rgba(
+      255,
+      255,
+      255,
+      0.09
+    );
+
+  color:
+    rgba(
+      255,
+      255,
+      255,
+      0.92
+    );
+}
+
+.tree-prototype-overview-list button.is-active span {
+  background:
+    rgba(
+      255,
+      255,
+      255,
+      0.88
+    );
+}
+
+.tree-prototype-dock {
+  position: absolute;
+  left: 50%;
+  bottom: clamp(18px, 3.5vh, 34px);
+  z-index: 8;
+
+  max-width: min(760px, 72vw);
+
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
+
+  padding:
+    8px;
+
+  border:
+    1px solid
+    rgba(
+      255,
+      255,
+      255,
+      0.12
+    );
+
+  border-radius: 20px;
+
+  background:
+    linear-gradient(
+      145deg,
+      rgba(
+        255,
+        255,
+        255,
+        0.08
+      ),
+      rgba(
+        255,
+        255,
+        255,
+        0.018
+      )
+    ),
+    rgba(
+      0,
+      0,
+      0,
+      0.44
+    );
+
+  box-shadow:
+    0 28px 82px
+      rgba(
+        0,
+        0,
+        0,
+        0.42
+      ),
+    inset 0 1px 0
+      rgba(
+        255,
+        255,
+        255,
+        0.06
+      );
+
+  translate: -50% 0;
+
+  backdrop-filter: blur(20px);
+  pointer-events: auto;
+  -webkit-app-region: no-drag;
+}
+
+.tree-prototype-dock > button {
+  appearance: none;
+
+  position: relative;
+
+  width: 42px;
+  height: 42px;
+
+  display: grid;
+  place-items: center;
+
+  border:
+    1px solid
+    rgba(
+      255,
+      255,
+      255,
+      0.10
+    );
+
+  border-radius: 14px;
+
+  background:
+    rgba(
+      255,
+      255,
+      255,
+      0.050
+    );
+
+  color:
+    rgba(
+      255,
+      255,
+      255,
+      0.64
+    );
+
+  cursor: pointer;
+
+  transition:
+    width 180ms
+      cubic-bezier(
+        0.22,
+        1,
+        0.36,
+        1
+      ),
+    transform 160ms ease-out,
+    border-color 140ms ease-out,
+    background 140ms ease-out,
+    color 140ms ease-out;
+}
+
+.tree-prototype-dock > button span {
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 8px);
+
+  max-width: 120px;
+
+  padding:
+    4px
+    7px;
+
+  border:
+    1px solid
+    rgba(
+      255,
+      255,
+      255,
+      0.10
+    );
+
+  border-radius: 999px;
+
+  background:
+    rgba(
+      0,
+      0,
+      0,
+      0.62
+    );
+
+  color:
+    rgba(
+      255,
+      255,
+      255,
+      0.72
+    );
+
+  font-size: 8px;
+  line-height: 1.15;
+  white-space: nowrap;
+
+  opacity: 0;
+
+  transform:
+    translateX(-50%)
+    translateY(4px);
+
+  transition:
+    opacity 140ms ease-out,
+    transform 140ms ease-out;
+
+  pointer-events: none;
+}
+
+.tree-prototype-dock > button:hover,
+.tree-prototype-dock > button:focus-visible,
+.tree-prototype-dock > button.is-active {
+  width: 54px;
+
+  border-color:
+    rgba(
+      255,
+      255,
+      255,
+      0.28
+    );
+
+  background:
+    rgba(
+      255,
+      255,
+      255,
+      0.12
+    );
+
+  color:
+    rgba(
+      255,
+      255,
+      255,
+      0.94
+    );
+
+  transform:
+    translateY(-5px);
+}
+
+.tree-prototype-dock > button:hover span,
+.tree-prototype-dock > button:focus-visible span {
+  opacity: 1;
+
+  transform:
+    translateX(-50%)
+    translateY(0);
+}
+
+.tree-prototype-dock > button:focus-visible {
+  outline:
+    1px solid
+    rgba(
+      255,
+      255,
+      255,
+      0.55
+    );
+
+  outline-offset: 3px;
+}
+
+.tree-prototype-dock > button:disabled {
+  opacity: 0.32;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.tree-prototype-popover {
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 16px);
+
+  width: 318px;
+
+  translate: -50% 0;
+
+  transform-origin: 50% 100%;
+}
+
+@keyframes tree-field-precess {
+  0%,
+  100% {
+    transform:
+      translate(-50%, -50%)
+      rotateX(70deg)
+      rotateZ(0deg);
+  }
+
+  50% {
+    transform:
+      translate(-50%, -50%)
+      rotateX(72deg)
+      rotateZ(7deg);
+  }
+}
+
+@keyframes tree-field-counter-precess {
+  0%,
+  100% {
+    transform:
+      translate(-50%, -50%)
+      rotateX(67deg)
+      rotateZ(28deg);
+  }
+
+  50% {
+    transform:
+      translate(-50%, -50%)
+      rotateX(65deg)
+      rotateZ(16deg);
+  }
+}
+
+@keyframes tree-space-pulse {
+  0%,
+  100% {
+    opacity: 0.18;
+    filter: blur(0);
+  }
+
+  50% {
+    opacity: 0.62;
+    filter: blur(0.5px);
+  }
+}
+
+@keyframes tree-depth-ring-breathe {
+  0%,
+  100% {
+    opacity: 0.70;
+  }
+
+  50% {
+    opacity: 1;
+  }
+}
+
+@keyframes tree-branch-draw {
+  from {
+    opacity: 0;
+
+    transform:
+      rotate(var(--branch-rotate))
+      rotateX(68deg)
+      translateZ(-46px)
+      scaleX(0.2);
+  }
+
+  to {
+    opacity: 1;
+
+    transform:
+      rotate(var(--branch-rotate))
+      rotateX(68deg)
+      translateZ(-46px)
+      scaleX(1);
+  }
+}
+
+@keyframes tree-branch-flow {
+  0%,
+  100% {
+    filter: brightness(0.84);
+  }
+
+  50% {
+    filter: brightness(1.34);
+  }
+}
+
+@keyframes tree-core-anchor-pulse {
+  0%,
+  100% {
+    opacity: 0.36;
+
+    transform:
+      rotateX(66deg)
+      scale(0.98);
+  }
+
+  50% {
+    opacity: 0.72;
+
+    transform:
+      rotateX(66deg)
+      scale(1.04);
+  }
+}
+
+@keyframes tree-node-orbit-a {
+  0%,
+  100% {
+    translate: 0 0;
+  }
+
+  50% {
+    translate: 12px -9px;
+  }
+}
+
+@keyframes tree-node-orbit-b {
+  0%,
+  100% {
+    translate: 0 0;
+  }
+
+  50% {
+    translate: -10px 11px;
+  }
+}
+
+@keyframes tree-node-orbit-c {
+  0%,
+  100% {
+    translate: 0 0;
+  }
+
+  50% {
+    translate: -14px -7px;
+  }
+}
+
+@keyframes tree-node-orbit-d {
+  0%,
+  100% {
+    translate: 0 0;
+  }
+
+  50% {
+    translate: 10px 12px;
+  }
+}
+
+@media (max-width: 980px) {
+  .tree-prototype-current {
+    top: 39%;
+    width: min(420px, 68vw);
+  }
+
+  .tree-prototype-children {
+    top: 49%;
+    bottom: 72px;
+
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    align-content: center;
+    gap: 10px;
+
+    padding: 0 24px;
+  }
+
+  .tree-prototype-node {
+    position: relative;
+    inset: auto;
+    width: auto;
+    min-height: 104px;
+
+    transform: none;
+  }
+
+  .tree-prototype-branch-field,
+  .tree-prototype-space {
+    display: none;
+  }
+
+  .tree-prototype-map,
+  .tree-prototype-overview,
+  .tree-prototype-editor {
+    display: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tree-prototype-node,
+  .tree-prototype-parent,
+  .tree-prototype-open-execution,
+  .tree-prototype-field::before,
+  .tree-prototype-field::after,
+  .tree-prototype-space span,
+  .tree-prototype-depth-ring,
+  .tree-prototype-branch-line,
+  .tree-prototype-core-anchor span {
+    transition: none;
+    animation: none;
+  }
+}

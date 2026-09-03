@@ -1,0 +1,578 @@
+# JARVIS Local LLM — Harness Engineering Architecture
+
+- **상태**: 설계 v3 — v2에 실제 앱 소스(`jarvisSourceFiles/`) 검토 결과 반영
+- **작성일**: 2026-09-04
+- **갱신**: 2026-09-04 — `jarvisSourceFiles/` 부분 입수 → §6.4(JS 바인딩)·§11·§12·§13·부록 A·부록 C 갱신
+- **표기 규칙**: `[사실]` 확인된 사실 · `[제안]` 설계 제안 · `[미결정]` 아직 결정하지 않은 사항
+- **이 문서의 범위**: Harness Engineering 설계만. 이번 단계에서는 runtime 구현·패키지 설치·모델 다운로드·학습을 수행하지 않는다.
+
+---
+
+## 1. 목적과 비목적
+
+### 1.1 프로젝트 목적
+
+JARVIS는 다음 흐름을 연결하는 개인 AI Command Center다.
+
+```
+Goal → Project → Task → Next Action → Execution
+```
+
+핵심 가치:
+
+- **Continuity** — 대화·문맥이 끊기지 않는다.
+- **Context Recovery** — 다시 시작해도 이전 맥락을 복원할 수 있다.
+- **실행 가능한 Next Action** — 대화가 아닌 다음 행동으로 이어진다.
+- **도구·문맥 관리 부담 감소** — 사용자가 직접 관리해야 할 것이 줄어든다.
+
+### 1.2 Harness의 역할
+
+Harness는 **LLM 자체가 아니라, LLM을 JARVIS에서 안정적으로 실험·비교·교체할 수 있게 만드는 주변 시스템**이다.
+즉, 특정 모델·runtime·프롬프트·도구에 대한 "껍데기(harness)"를 만들어, 어떤 구성이 JARVIS에 적합한지
+작은 비용으로 검증하고, 문제가 있으면 안전하게 되돌릴 수 있게 한다.
+
+### 1.3 비목적 (Harness가 담당하지 않는 것)
+
+| 항목 | 설명 |
+|---|---|
+| JARVIS UI 설계 | 화면·CLI 인터페이스는 기존 앱의 책임 |
+| JARVIS의 실제 Task state 관리 | Goal/Project/Task/Next Action 저장·상태 전이는 기존 앱의 책임 |
+| persistent product behavior | 제품의 장기 행동 규칙은 기존 앱의 책임 |
+| 실제 tool execution 내부 로직 | `create_task`의 실제 저장 로직 등은 기존 앱의 책임 |
+| 지금 단계에서의 LoRA 학습 | 데이터·평가 기반 구축이 먼저이며, 학습은 후속 단계 |
+| 대규모 모델 다운로드 | Harness 설계 자체에는 다운로드가 포함되지 않음 (실행 단계의 환경 작업) |
+| 기존 JARVIS 앱의 기능 수정 | Harness는 앱에 "연결"되며 앱의 기능을 바꾸지 않는다 |
+
+---
+
+## 2. Harness 책임 범위
+
+### 2.1 포함 (Harness가 하는 일)
+
+- 로컬 모델 및 runtime을 교체할 수 있는 **adapter**
+- **OpenAI-compatible API 경계** (runtime과 Harness 사이의 표준 접점)
+- **prompt와 system instruction 관리** (템플릿·버전 관리)
+- **JARVIS context 입력 형식과 context packing**
+- **Tool schema 정의와 tool call 검증**
+- LLM의 tool 선택과 실제 실행 코드 사이의 **명확한 경계** (실행은 JARVIS, 판단은 LLM)
+- 요청·응답·tool call·tool result **기록 (trace)**
+- **개인정보·민감정보 제거 (PII 필터)**
+- **실패 사례와 사용자 correction 수집**
+- 학습용 **JSONL 생성** 및 **train / validation / held-out test 분리**
+- 기본 모델과 LoRA 모델의 **동일 조건 평가**
+- **latency·VRAM·tool accuracy·hallucination 측정**
+- 설정과 실험 결과의 **재현성**
+- **smoke test와 작은 end-to-end test**
+- 모델 또는 LoRA를 안전하게 되돌리는 **rollback 구조**
+
+### 2.2 제외 (1.3과 2.1의 여집합)
+
+- 위 1.3 표의 모든 항목
+- 실제 tool의 비즈니스 로직 (조회·생성·저장)
+- Harness 내부에 특정 모델·runtime을 강제로 결합하는 일 (교체 가능해야 함)
+
+---
+
+## 3. 전체 구성요소
+
+```mermaid
+flowchart LR
+    subgraph APP["JARVIS App (기존 앱 · 수정 최소화)"]
+        ORCH["Orchestrator<br/>Goal → Project → Task → Next Action"]
+        TOOL["Tool 실행 코드<br/>project/task 조회·생성·저장"]
+    end
+
+    subgraph HRN["Harness (이 문서의 설계 범위)"]
+        CLIENT["HarnessClient<br/>(interface contract)"]
+        PROMPT["Prompt 관리"]
+        PACK["Context Packing"]
+        TSCHEMA["Tool Schema · 검증"]
+        GATE["Permission Gate"]
+        TRACE["로깅 · PII 필터"]
+        CORR["Correction 수집"]
+        DSET["Dataset · train/val/test"]
+        EVAL["평가 · 지표 측정"]
+        CFG["Config · 실험 recipe"]
+    end
+
+    subgraph RT["Model Runtime (교체 가능)"]
+        OLLAMA["Ollama"]
+        LLAMACPP["llama.cpp server"]
+        REMOTE["원격 OpenAI-compatible"]
+    end
+
+    ORCH --> CLIENT
+    CLIENT --> PROMPT
+    PROMPT --> PACK
+    PACK --> OLLAMA
+    PACK --> LLAMACPP
+    PACK --> REMOTE
+    CLIENT --> TSCHEMA
+    TSCHEMA --> GATE
+    GATE --> TOOL
+    TOOL --> CLIENT
+    CLIENT --> TRACE
+    TRACE --> CORR
+    CORR --> DSET
+    DSET --> EVAL
+    CFG --> CLIENT
+    CFG --> EVAL
+```
+
+주요 구성요소 11개:
+
+| # | 구성요소 | 역할 요약 |
+|---|---|---|
+| 1 | `HarnessClient` | JARVIS가 접촉하는 유일한 접점. interface contract 제공 |
+| 2 | `Runtime Adapter` | Ollama / llama.cpp server / 원격 API를 같은 방식으로 호출 |
+| 3 | `Prompt 관리` | system instruction·프롬프트 템플릿의 버전 관리 |
+| 4 | `Context Packing` | JARVIS의 Goal/Project/Task/Next Action 문맥을 LLM 입력으로 변환 |
+| 5 | `Tool Schema` | tool 목록·JSON schema 정의 및 생성 |
+| 6 | `Tool 검증` | LLM이 만든 tool call의 schema·필수 필드 검증 |
+| 7 | `Permission Gate` | 읽기 tool은 실행, 상태 변경 tool(`create_task`)은 사용자 확인 |
+| 8 | `Trace` | 요청·응답·tool call·tool result 기록 + PII 필터 |
+| 9 | `Correction` | 사용자 보정·실패 사례 수집 |
+| 10 | `Dataset` | JSONL 생성, train/val/held-out 분리 |
+| 11 | `Evaluator` | 동일 조건 평가 (base vs LoRA), latency·VRAM·tool accuracy·hallucination |
+
+---
+
+## 4. 구성요소별 책임
+
+### 4.1 `HarnessClient`
+- **책임**: JARVIS의 모든 LLM 호출을 대신 처리. `chat()` 1회 호출로 내부적으로 prompt packing → adapter 호출 → tool call 반복 처리 → 최종 응답까지 완결.
+- **비책임**: JARVIS의 state 접근, 실제 tool 실행.
+- **인터페이스**: 6절 참조.
+
+### 4.2 `Runtime Adapter`
+- **책임**: runtime별 차이(엔드포인트·포트·인증·tool call 포맷)를 내부로 숨기고 동일한 호출 방식을 제공.
+- **비책임**: prompt 조합, tool 검증, 응답 생성 정책.
+- **원칙**: `[제안]` Ollama와 llama.cpp server는 모두 OpenAI-compatible API를 제공하므로 **하나의 OpenAI-compatible adapter**로 시작하고, 포맷 차이가 실제로 문제가 될 때만 개별 adapter를 추가한다.
+
+### 4.3 `Prompt 관리`
+- **책임**: system instruction(역할·행동 규칙·tool 사용 규칙)과 프롬프트 템플릿을 코드와 분리해 관리하고 버전을 기록.
+- **비책임**: 프롬프트 내용을 제품 로직으로 강제 (LLM 판단은 자유).
+
+### 4.4 `Context Packing`
+- **책임**: JARVIS의 `Goal → Project → Task → Next Action` 문맥을 LLM 입력 형식으로 정리 (예: 현재 프로젝트 요약 + 진행 중 task + 최근 결정).
+- **비책임**: 문맥의 원천 데이터 관리 (기존 앱 소유).
+
+### 4.5 `Tool Schema` / `Tool 검증`
+- **책임**: 초기 tool 4개(5절)의 JSON schema 정의, LLM이 생성한 `tool_call`의 구조·필수 필드·값 범위 검증.
+- **비책임**: tool의 실제 동작.
+
+### 4.6 `Permission Gate`
+- **책임**: tool_call을 실행 전 분류 — 읽기 전용(read)은 통과, 상태 변경(write, 예: `create_task`)은 **사용자 확인(confirm) 또는 명시적 권한 검사**를 요구하고 미승인 시 차단.
+- **비책임**: 실행 자체 (실행은 JARVIS).
+
+### 4.7 `Trace` / PII 필터
+- **책임**: `trace_id` 단위로 요청·응답·tool call·tool result·latency를 기록. 저장 전 PII(이메일·전화번호·이름 등) 필터 적용 (config로 on/off).
+- **비책임**: 로그 분석/대시보드 (필요 시 후속).
+
+### 4.8 `Correction`
+- **책임**: 사용자가 응답을 수정·거부·재지시한 경우를 (입력, 출력, 수정된 출력, 이유) 형태로 수집.
+- **비책임**: correction을 자동으로 학습에 반영 (수동 검토 후 반영).
+
+### 4.9 `Dataset`
+- **책임**: trace/correction을 학습용 JSONL로 변환, **train / validation / held-out test** 분리. leakage 방지를 위해 **같은 프로젝트 단위로 분리**.
+- **비책임**: 학습 실행 (후속 단계에서 Soup 사용).
+
+### 4.10 `Evaluator`
+- **책임**: base 모델 vs LoRA 모델을 **같은 held-out·같은 프롬프트·같은 tool set·같은 seed**로 평가. 지표: latency(TTFT/E2E), VRAM peak, tool accuracy, hallucination, correction rate.
+- **비책임**: 지표 기준의 영업적 판단 (수치는 제공, 적용 판단은 gate 규칙으로).
+
+### 4.11 `Config` / 실험 recipe
+- **책임**: runtime·model·prompt 버전·tool set·평가 seed를 하나의 recipe로 기록해 동일 재현.
+- **비책임**: recipe를 만든 도구의 설치 관리.
+
+---
+
+## 5. 데이터 흐름 (요청 → 최종 응답)
+
+```mermaid
+sequenceDiagram
+    participant U as 사용자
+    participant J as JARVIS App
+    participant H as HarnessClient
+    participant A as Runtime Adapter
+    participant M as Local LLM (Ollama / llama.cpp)
+    participant G as Tool 검증 + Permission Gate
+    participant T as JARVIS Tool 실행
+
+    U->>J: 입력 (Goal/Project 맥락)
+    J->>H: chat(messages, tools, context)
+    H->>H: prompt 조합 + context packing
+    H->>A: OpenAI-compatible 호출
+    A->>M: chat/completions 요청
+    M-->>A: 응답 (text 또는 tool_call)
+    A-->>H: 응답
+    alt tool_call 포함
+        H->>G: schema 검증 + 권한 확인
+        alt 읽기 전용 tool
+            G->>T: 실행
+        else 상태 변경 tool (create_task)
+            G-->>J: 사용자 confirm 요청
+            J-->>G: 승인/거부
+        end
+        T-->>H: ToolResult
+        H->>A: tool result 포함 재호출
+        A->>M: 재요청
+        M-->>A: 최종 응답
+    end
+    H-->>J: 최종 응답
+    H->>H: trace 기록 (PII 필터 후)
+    J-->>U: 응답
+```
+
+핵심 원칙: **판단은 LLM, 실행은 JARVIS, 검증·권한은 Harness**.
+
+---
+
+## 6. JARVIS ↔ Harness Interface Contract
+
+### 6.1 계약 원칙
+1. **JARVIS는 Harness 내부를 모른다** — 어떤 runtime·프롬프트를 쓰는지 몰라도 동작해야 한다.
+2. **Harness는 JARVIS의 state를 모른다** — ToolResult를 통해서만 정보를 얻는다.
+3. **Harness는 tool을 실행하지 않는다** — gate를 통과한 tool_call만 JARVIS에 전달한다.
+4. 모든 요청·응답은 `trace_id`로 추적 가능하다.
+
+### 6.2 타입 계약 `[제안]`
+
+```python
+# harness/client.py
+@dataclass
+class ChatRequest:
+    messages: list[dict]            # role: system / user / assistant / tool
+    tools: list[ToolSchema] | None  # 이번 요청에서 노출할 tool 목록
+    context: dict | None            # Goal/Project/Task/Next Action 요약 (선택)
+    metadata: dict                  # project_id, 사용자 구분 등
+    trace_id: str | None
+
+@dataclass
+class ChatResponse:
+    content: str
+    tool_calls: list[ToolCall]      # name + arguments(dict)
+    finish_reason: str
+    trace_id: str
+
+@dataclass
+class ToolCall:
+    name: str
+    arguments: dict
+
+@dataclass
+class ToolResult:
+    tool_call_id: str
+    ok: bool
+    data: dict | None               # 성공 시 조회 결과 / 생성 결과
+    error: str | None               # 실패 시 이유
+
+# adapter 계약 (runtime 교체 지점)
+class RuntimeAdapter(Protocol):
+    async def chat(self, request: ChatRequest) -> ChatResponse: ...
+```
+
+### 6.3 Tool 실행 계약
+- JARVIS는 `ToolResult(tool_call_id, ok, data|error)`로만 응답한다.
+- Harness는 실패한 tool_call도 LLM에 되돌려 "이유 + 재시도 여부"를 판단하게 한다. `[제안]`
+
+### 6.4 JARVIS(JS·Electron) ↔ Harness 바인딩 `[제안]` — v3 추가
+
+앱 소스 검토 결과(부록 C) JARVIS UI는 React(JSX)이며 유일한 native 경계는 `window.jarvisWindow` preload 브리지다.
+이에 따라 Harness(Python)와의 연결은 **renderer → preload 브리지 → Electron main → Harness 로컬 HTTP** 구조를 제안한다.
+
+```ts
+// app측 JS 바인딩 (renderer 또는 main) — [제안]
+interface HarnessChatRequest {
+  messages: Array<{
+    role: 'system' | 'user' | 'assistant' | 'tool';
+    content: string;
+  }>;
+  tools?: unknown[];                    // ToolSchema[]
+  context?: Record<string, unknown>;    // project_id 등
+}
+
+interface HarnessChatResponse {
+  content: string;
+  tool_calls: Array<{
+    name: string;
+    arguments: Record<string, unknown>;
+  }>;
+  trace_id: string;
+}
+```
+
+- **왜 renderer가 직접 fetch하지 않는가**: 로컬 LLM runtime(Ollama 등)은 브라우저 origin CORS를 보장하지 않고, 엔드포인트·인증 정보를 renderer에 노출하지 않기 위해 main 경유가 안전하다. 기존 앱도 `window.jarvisWindow`로 native 기능을 이미 브리징하므로 패턴이 일치한다.
+- **계약 대응**: JS `HarnessChatRequest`/`HarnessChatResponse`는 Python 계약(6.2)의 `ChatRequest`/`ChatResponse`와 1:1 대응. 같은 계약이면 전송 계층(IPC 직접 vs HTTP+JSON)은 추후 교체 가능. `[미결정]`
+
+---
+
+## 7. Model Runtime 교체 방법
+
+### 7.1 교체 지점
+교체는 **HarnessClient 내부의 adapter와 config 값**만으로 이뤄진다. JARVIS 코드는 변하지 않는다.
+
+```yaml
+# configs/harness.yaml  [제안]
+runtime: ollama            # ollama | llama_cpp | openai(원격)
+model: qwen2.5:7b-instruct
+base_url: http://localhost:11434/v1   # ollama 기본
+profile: desktop           # desktop(4070 12GB) / laptop
+```
+
+### 7.2 후보 (고정하지 않음 — 교체 가능한 후보로만 취급)
+
+| 후보 | 종류 | 비고 |
+|---|---|---|
+| Qwen3-8B | base model | 최신 Qwen 계열. 한국어·tool calling 능력 확인 필요 |
+| Qwen2.5-7B-Instruct | base model | 검증 이력이 많음. 초기 평가 추천 후보 `[제안]` |
+| Ollama | runtime | OpenAI-compatible API 내장, 설치·운영 단순. 초기 runtime 추천 `[제안]` |
+| llama.cpp server | runtime | GGUF 직접 실행, 경량. Ollama가 부족할 때 대안 |
+
+> **Soup 관련**: Soup은 이후 LoRA/QLoRA 학습 도구 **후보**이며, 초기 Harness의 필수 runtime으로 결합하지 않는다.
+> 초기 Harness는 기본(파인튜닝 전) 모델만으로 동작해야 한다.
+
+### 7.3 교체 절차
+1. config의 `runtime`·`model` 변경
+2. `smoke` 테스트로 왕복 확인
+3. trace에서 latency·응답 품질 비교
+4. 문제 시 이전 config로 복원 (rollback, 10절)
+
+---
+
+## 8. Tool Call 검증과 Permission 경계
+
+### 8.1 초기 tool 목록 `[제안]`
+
+| Tool | 성격 | 설명 |
+|---|---|---|
+| `get_project_context(project_id)` | read | 프로젝트 목표·문맥·최근 결정 조회 |
+| `list_current_tasks(project_id)` | read | 현재 진행 중 task 목록 조회 |
+| `propose_next_action(project_id)` | read | 다음 행동 후보 제안 (JARVIS 내부 로직 사용) |
+| `create_task(project_id, title, reason)` | **write** | 새 task 생성 — **사용자 확인 필요** |
+
+### 8.2 역할 분담
+- **LLM**: 어떤 tool이 필요한지 판단, 올바른 argument 생성, 정보가 부족하면 질문, tool result를 바탕으로 응답 생성. — **실행은 하지 않는다.**
+- **JARVIS**: 실제 조회·생성·저장.
+- **Harness**: schema 검증, 권한(permission) 검사.
+
+### 8.3 검증 흐름
+1. **schema 검증**: tool 이름 존재, `arguments`가 JSON schema 준수, 필수 필드(`project_id` 등) 존재.
+2. **권한 검사 (Permission Gate)**: read tool → 통과. write tool(`create_task`) → 사용자 confirm 요청, 승인 전 실행 차단.
+3. **검증 실패 처리**: 실패 사유를 LLM에 되돌려 수정·재시도. 반복 실패(예: 2회)는 trace + correction 수집 후 중단. `[제안]`
+
+### 8.4 명시적 규칙
+- `create_task` 같은 **상태 변경 tool은 사용자 확인 또는 명시적인 권한 검사를 거치도록 설계**한다. (설계 위반 금지 항목)
+
+---
+
+## 9. 로깅 · 보정 수집 · 데이터셋 생성
+
+### 9.1 Trace 구조
+`trace_id` 하나에 다음을 묶는다 `[제안]`:
+
+```jsonc
+{
+  "trace_id": "t_...",
+  "ts": "ISO-8601",
+  "request": { "messages": [...], "tools": [...], "context": {...} },
+  "response": { "content": "...", "tool_calls": [...] },
+  "tool_results": [...],
+  "latency_ms": { "ttft": 320, "e2e": 2100 },
+  "model": "qwen2.5:7b-instruct", "runtime": "ollama", "prompt_version": "v1",
+  "user_corrected": false
+}
+```
+
+### 9.2 PII 필터
+- 저장 전 필터 (이메일·전화번호·주소·이름 패턴) `[제안]`
+- config `trace.pii_filter: true`로 on/off
+- `data/` 디렉터리는 gitignore + 공개 저장소 업로드 금지 `[제안]`
+
+### 9.3 Correction 수집
+사용자가 응답을 수정·거부한 경우 다음을 저장 `[제안]`:
+
+```jsonc
+{
+  "trace_id": "...",
+  "input": "...", "output": "...", "corrected": "...",
+  "reason": "wrong_tool | hallucination | style | etc."
+}
+```
+
+### 9.4 Dataset 생성 및 분리
+- trace/correction → 학습용 JSONL (OpenAI 메시지 형식 권장 `[제안]`)
+- 분리 비율: train 80 / validation 10 / held-out test 10 `[제안]`
+- **leakage 방지**: 같은 `project_id`(또는 사용자)가 여러 분할에 걸치지 않도록 **프로젝트 단위 분리** `[제안]`
+- held-out test는 **평가 전까지 눈으로도 보지 않음** (LoRA 전후 비교용)
+
+---
+
+## 10. 평가 구조와 최소 지표
+
+### 10.1 원칙
+- **동일 조건**: 같은 held-out, 같은 system prompt, 같은 tool set, 같은 seed에서 base 모델 vs LoRA 모델 비교.
+- **개선 입증 시에만 적용** (dev 순서 10–11).
+
+### 10.2 최소 지표 `[제안]`
+
+| 지표 | 정의 | 측정 | 목표(12GB GPU 기준) |
+|---|---|---|---|
+| latency TTFT | 첫 token까지 시간 | trace | < 1s (7–8B, Q4) |
+| latency E2E | 전체 응답 시간 | trace | < 3s |
+| VRAM peak | 최대 VRAM 사용량 | `nvidia-smi` | 12GB 이내 |
+| tool accuracy | gold tool_call 대비 tool·args 정확 일치율 | held-out gold set | 기준치 확정 필요 |
+| hallucination | tool result에 없는 사실 주장 비율 | 수동 샘플 검수 | 기준치 확정 필요 |
+| correction rate | 사용자 보정 비율 | correction 로그 | 추세 감소 확인 |
+
+### 10.3 적용 gate `[제안]`
+LoRA 모델 적용 조건: **동일 held-out에서 tool accuracy 유지·향상 + hallucination·correction rate 악화 없음**.
+충족하지 않으면 이전(base) 모델로 유지 — 이 구조 자체가 rollback이다.
+
+---
+
+## 11. 권장 디렉터리 구조
+
+```
+jarvis-local-llm-harness/          # 논리적 이름 (실제 경로는 FB_Soap_LocalLLM)
+├── harness/
+│   ├── client.py                  # HarnessClient (JARVIS 계약)
+│   ├── adapters/                  # ollama.py · llama_cpp.py · openai.py
+│   ├── prompt.py                  # system instruction / 템플릿
+│   ├── context.py                 # context packing
+│   ├── tools.py                   # tool schema 정의·검증
+│   ├── gate.py                    # permission / confirm
+│   ├── trace.py                   # 로깅 + PII 필터
+│   ├── correction.py              # 보정 수집
+│   ├── dataset.py                 # JSONL 생성·분리
+│   ├── evaluate.py                # 평가 실행·지표
+│   └── config.py                  # 설정·실험 recipe
+├── configs/
+│   ├── harness.yaml
+│   └── experiments/               # recipe별 설정 (재현용)
+├── data/                          # gitignore 권장
+│   ├── raw/                       # 원본 trace·correction
+│   ├── train/  val/  heldout/
+├── eval/
+│   ├── cases.jsonl                # held-out gold set
+│   └── rubric.md
+├── scripts/
+│   ├── smoke.sh                   # 최소 왕복 테스트
+│   ├── e2e.sh                     # 작은 end-to-end
+│   └── rollback.sh                # 이전 recipe 복원
+└── tests/                         # unit · smoke · e2e
+```
+
+`[제안]` 구조이며, 전체 JARVIS 앱 코드(현재는 UI 스냅샷만 입수 — 부록 C)가 입수되면 앱과 병치(병렬 배치)하거나 앱 내 `harness/`로 흡수한다. **기존 앱의 기능은 수정하지 않는다.**
+
+> `[제안]` v3 검토 기준: JARVIS는 Electron(React) 앱이므로 harness(Python)는 **Electron main이 spawn/호출하는 로컬 HTTP 서비스**(예: `http://127.0.0.1:<port>`)로 두고, renderer는 preload 브리지를 경유한다(§6.4). 실제 배치 위치는 앱 전체 입수 후 확정.
+
+---
+
+## 12. 단계별 Implementation Plan (개발 순서 보존)
+
+아래 순서는 변경하지 않는다. 각 단계의 완료 기준을 통과해야 다음으로 진행한다.
+
+| # | 단계 | 목표 | 완료 기준 |
+|---|---|---|---|
+| 1 | Harness 구조 구축 | skeleton + config + client 계약 | `harness/` 골격, `configs/harness.yaml`, 인터페이스 정의 |
+| 2 | 기본 모델·runtime 선택 | Ollama vs llama.cpp server 비교 후 결정 | runtime 1개 + model 1개 확정 (Qwen 계열) |
+| 3 | 파인튜닝 없는 로컬 모델 실행 | `[제안]` `ollama pull qwen2.5:7b-instruct` 등 | 로컬에서 채팅 응답 확인 |
+| 4 | OpenAI-compatible API 제공 | Ollama(내장) 또는 llama.cpp server | curl로 `/v1/chat/completions` 응답 확인 |
+| 5 | JARVIS 연결 | **LLM 호출 경계 신설** — 교체할 기존 LLM 호출이 없으므로(부록 C) Electron main 경유로 `HarnessClient`를 새로 연결 | 앱이 로컬 모델로 동작, cloud와 교체 가능 |
+| 6 | 최소 Tool Calling | 4개 tool schema + 검증 + gate | `get_project_context` 등 read tool 1개 이상 e2e 통과 |
+| 7 | 실패·correction 수집 | trace/correction 운영 시작 | 샘플 trace + correction 확보 |
+| 8 | LoRA 필요성 판단 | 반복 실패 분석 | "LoRA로 개선 가능한 패턴"이 있는지 결론 |
+| 9 | 데이터 분리 + Soup LoRA/QLoRA | dataset 분리 후 Soup 학습 | held-out을 제외한 데이터로 학습 완료 |
+| 10 | 동일 held-out 비교 | base vs LoRA 동일 조건 평가 | 10.2 지표 산출 |
+| 11 | 개선 입증 시 적용 | gate 통과 시에만 전환 | 10.3 gate 충족, 아니면 base 유지 |
+
+> Soup은 **단계 9부터** 등장한다. 초기 Harness(1–8)는 Soup 없이 동작해야 한다.
+
+---
+
+## 13. 주요 위험과 미결정 사항
+
+### 13.1 위험
+
+| 위험 | 영향 | 완화 |
+|---|---|---|
+| tool schema와 실행 경계가 흐려져 LLM이 직접 실행하는 구조로 변질 | 설계 위반, 안전 문제 | gate를 필수 통과 지점으로 고정, write tool은 confirm 필수 |
+| 평가 없이 LoRA 적용 → 성능 후퇴 | 사용자 경험 저하 | 10.3 gate (동일 held-out 개선 입증 시에만) |
+| PII가 로그·데이터셋에 잔류 → 외부 노출 | 개인정보 유출 | PII 필터 + `data/` gitignore + 공개 업로드 금지 |
+| context가 길어지면 latency·비용 증가 | 지연 | context packing 최소화, 요약형 context 우선 |
+| runtime·모델 선택 지연 | 일정 지연 | Ollama + Qwen2.5-7B로 시작하고 후보는 교체 가능으로 유지 |
+| 기존 앱에 LLM/네트워크 호출이 없음 (부록 C) | "교체" 가정이 빗나가 통합 설계 재작업 | 현재 첨부 파일 기준 LLM 호출 0건 `[사실]` — Electron main 미입수로 잔존 가능성만 확인 후 §6.4 계약으로 조정 |
+| v2 이전의 "Python 앱" 가정 vs 실제 React(JSX) | 스택 불일치로 계약·구조 재작업 | §6.4 JS 바인딩으로 이중 계약 유지, Python 여부는 전체 구조 입수 후 확정 `[미결정]` |
+
+### 13.2 미결정 사항
+
+| 항목 | 현재 상태 |
+|---|---|
+| base model 최종 선택 | Qwen3-8B vs Qwen2.5-7B-Instruct `[미결정]` — 초기에는 Qwen2.5-7B 추천 `[제안]` |
+| runtime 최종 선택 | Ollama vs llama.cpp server `[미결정]` — 초기에는 Ollama 추천 `[제안]` |
+| JARVIS 앱 전체 구조 | UI 6개 파일 입수·검토 완료 `[사실]` — Electron main·preload·`useExecutionSession`/`useTaskTree`·`package.json` 미입수 → LLM 채널 최종 확정 `[미결정]` |
+| 평가 지표 기준치 | tool accuracy·hallucination 목표 수치 미확정 `[미결정]` |
+| dataset 형식·분리 비율 | OpenAI 메시지 형식, 80/10/10 제안 `[제안]` — 확정 필요 |
+| correction 수집 UI 방식 | 기존 앱에 최소 침습으로 넣는 방법 `[미결정]` |
+| 음성(STT/TTS) 통합 | 범위 제외 유지 — adapter 설계 원칙은 **부록 B** 참고 `[제안]` |
+| 실행 환경 상세 | Windows + WSL2, RTX 4070 12GB, 단일 GPU `[사실]` — Python 버전 등 미확정 |
+
+---
+
+## 14. 가장 작은 첫 Implementation Slice
+
+### Slice 0 — "로컬 모델 1개와 HarnessClient 1회 왕복"
+
+- **범위**: config, `HarnessClient` 최소 구현, Ollama adapter, 최소 trace, smoke 스크립트
+- **목표**: tool call 없이, 로컬 모델이 "질문 → 응답"을 Harness를 통해 완결
+- **제외**: tool schema·gate, dataset, 평가 (다음 slice)
+- **완료 기준**:
+  - `python -m harness.smoke` 실행 시 로컬 모델 응답 확인
+  - `trace_id`로 요청·응답·latency가 기록됨
+- **필요 환경**: Ollama 설치 + 모델 1개 (예: `ollama pull qwen2.5:7b-instruct`) `[제안]`
+- **코드 규모**: 약 200줄 `[제안]`
+- **다음 slice**: tool schema + 검증 + gate + `get_project_context` 1개 read tool end-to-end
+
+---
+
+### 부록 A: 이 문서의 검증 상태 (v3)
+
+- `[사실]` workspace 구성: `docs/harness-design.md`, `jarvisSourceFiles/`(6개), `motionReferenceSources/`(15개, UI 참조용), `.freebuff/`. git 저장소 아님.
+- `[사실]` `jarvisSourceFiles/`는 React(JSX) UI 6개 — LLM·네트워크 호출 없음, 외부 모듈은 OFFLINE placeholder. 상세는 부록 C.
+- `[미검증]` JARVIS 앱 전체(Electron main·preload·hooks·빌드 설정)와 지표 목표치 — 미입수/실측 필요.
+
+### 부록 B: 음성(STT/TTS) 확장 설계 원칙 — 추후 적용
+
+음성은 LLM 코드에 직접 박지 않는다. **독립된 입력/출력 모듈**로만 추가한다.
+
+- **Text-first 코어**: 텍스트 JARVIS(HarnessClient ↔ JARVIS)는 음성 모듈에 대한 의존성이 0이어야 한다. 음성이 없어도 완전히 동작하고, 음성이 실패해도 그대로 동작한다. `[원칙]`
+- **인터페이스 분리**: 음성은 JARVIS 앱 경계(입력 앞/출력 뒤)에 붙는다. HarnessClient와 LLM 사이에는 절대 끼어들지 않는다.
+
+```python
+# voice/adapters.py (추후) — [제안]
+class STTAdapter(Protocol):
+    """음성 → 텍스트. JARVIS 입력 경계 앞에 위치"""
+    async def transcribe(self, audio) -> str: ...
+
+class TTSAdapter(Protocol):
+    """텍스트 → 음성. JARVIS 출력 경계 뒤에 위치"""
+    async def speak(self, text: str) -> None: ...
+```
+
+- **실패 격리**: STT/TTS 어느 쪽이 실패·미구현이어도 텍스트 입력/출력으로 자동 폴백한다. 코어에 영향 없음.
+- **구현 후보**(추후 검토, 미결정): faster-whisper(STT), edge-tts / Piper(TTS).
+- 상태: 이번 Harness 범위(§1.3)에서는 제외 유지. Slice 0~11 완료 후 이 부록을 기반으로 별도 설계 확정.
+
+### 부록 C: jarvisSourceFiles 검토 결과 (2026-09-04)
+
+`jarvisSourceFiles/`에 첨부된 6개 파일(`App.jsx`, `main.jsx`, `CommandCenter.jsx`, `QuickPip.jsx`, `TreePrototype.jsx`, `App.css`) 검토 결과.
+
+- `[사실]` **스택**: React 18 + Vite + Electron 전제의 JSX UI. anime.js(`CommandCenter`), `motion/react`, lucide-react 사용. Python 코드 없음 — v2 이전의 "Python 앱" 가정과 상충하므로 전체 구조 입수 시 재확인 필요.
+- `[사실]` **LLM·네트워크 호출 없음**: fetch/axios/OpenAI 등 호출 코드 0건. CommandCenter의 WEATHER/CALENDAR/NEWS는 하드코딩 `OFFLINE` placeholder.
+- `[사실]` **화면 구조**: SYSTEM surface(`TreePrototype`) = Goal→Project→Task 트리(3D carousel·breadcrumb·pin), EXECUTION surface(`CommandCenter`/`QuickPip`) = Objective/Next Action/Timer/Checklist.
+- `[사실]` **유일한 native 경계**: `window.jarvisWindow` preload 브리지. 구현(Electron main)은 미첨부 → LLM 관련 코드가 main에 있을 가능성은 완전 배제하지 않음.
+- `[사실]` **persistence**: pinned shortcuts는 `localStorage`(`jarvis_tree_pinned_shortcuts_v1`). `useExecutionSession`/`useTaskTree` hook 미첨부로 Objective·Task 저장 방식 미확인.
+- `[제안]` **8.1 tool 4개 ↔ 기존 state 매핑**: `get_project_context`/`list_current_tasks`/`create_task`는 `useTaskTree`·`useExecutionSession`(또는 그 뒤 저장소) 대상, `propose_next_action`은 JARVIS 내부 로직 대상.
+- `[제안]` **LLM 채널**: renderer가 localhost LLM에 직접 fetch하면 CORS·origin 문제와 엔드포인트 노출이 생기므로, 기존 `window.jarvisWindow` 패턴대로 **Electron main이 harness를 호출**하는 구조가 적합(§6.4).
+- `[미결정]` Electron main·preload·`useExecutionSession`·`useTaskTree`·`SevenSegmentTime`·`index.css`·`package.json` 미첨부 → M0에서 입수 필요.

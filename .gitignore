@@ -1,0 +1,27 @@
+# Freebuff local settings
+.freebuff/
+
+# Agent config (personal autorun defaults)
+.agents/
+
+# Local data & traces (may contain PII) — never commit
+data/
+
+# Third-party reference sources (Motion Primitives etc.) — not ours to commit
+motionReferenceSources/
+
+# Node / bun
+node_modules/
+dist/
+out/
+*.log
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# OS
+.DS_Store
+Thumbs.db
