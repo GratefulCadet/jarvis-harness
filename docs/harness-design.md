@@ -269,7 +269,7 @@ class ToolResult:
 
 # adapter 계약 (runtime 교체 지점)
 class RuntimeAdapter(Protocol):
-    async def chat(self, request: ChatRequest) -> ChatResponse: ...
+    def chat(self, request: ChatRequest) -> ChatResponse: ...  # Slice 0 동기 [결정] v4.2
 ```
 
 ### 6.3 Tool 실행 계약
@@ -528,14 +528,15 @@ jarvis-local-llm-harness/          # 논리적 이름 (실제 경로는 FB_Soap_
 
 ### Slice 0 — "로컬 모델 1개와 HarnessClient 1회 왕복"
 
+- **상태 (v4.2)**: 구현·검증 완료 `[사실]` — `harness/`(config·client·adapters·trace), `configs/harness.yaml`, `scripts/smoke.py`, `tests/test_harness.py`(5개 통과). 실제 Ollama 왕복 성공: `local-jarvis-qwen3:8b`, e2e ~7.8s, trace JSON 기록 확인.
 - **범위**: config, `HarnessClient` 최소 구현, Ollama adapter, 최소 trace, smoke 스크립트
-- **목표**: tool call 없이, 로컬 모델이 "질문 → 응답"을 Harness를 통해 완결
+- **목표**: tool call 없이, 로컬 모델이 "질문 → 응답"을 Harness를 통해 완결 — 달성
 - **제외**: tool schema·gate, dataset, 평가 (다음 slice)
 - **완료 기준**:
-  - `python -m harness.smoke` 실행 시 로컬 모델 응답 확인
-  - `trace_id`로 요청·응답·latency가 기록됨
-- **필요 환경**: Ollama 설치 + 모델 1개 (예: `ollama pull qwen2.5:7b-instruct`) `[제안]`
-- **코드 규모**: 약 200줄 `[제안]`
+  - `python -m scripts.smoke` (실 Ollama) / `python -m scripts.smoke --mock` (오프라인) → 로컬 모델 응답 확인
+  - `trace_id`로 요청·응답·latency 기록 → `data/traces/*.json` 확인
+- **필요 환경**: Ollama 기동 + `local-jarvis-qwen3:8b` 존재 `[사실]` (2026-09-04 확인) — `configs/harness.yaml` 기본값
+- **adapter**: ollama `native_chat`(`/api/chat` — 참조 앱 `ask_ollama`와 동일 형식), `openai_compat`(`/v1` — llama.cpp/원격용), `mock`(오프라인 테스트)
 - **다음 slice**: tool schema + 검증 + gate + `get_project_context` 1개 read tool end-to-end
 
 ---
@@ -545,7 +546,8 @@ jarvis-local-llm-harness/          # 논리적 이름 (실제 경로는 FB_Soap_
 - `[사실]` workspace: git 저장소 초기화 완료(root commit `dcbd1c7`) — `docs/harness-design.md`, `jarvisSourceFiles/`(6), `.gitignore` 커밋됨. git author는 placeholder(추후 amend).
 - `[사실]` 참조 앱: `Desktop/AI_WORKSPACE/projects/local-jarvis` (read-only 지정, 수정 금지) — Python + Ollama + 음성. 상세는 부록 D.
 - `[사실]` `jarvisSourceFiles/`는 React(JSX) UI 프로토타입 6개 — LLM·네트워크 호출 없음, OFFLINE placeholder. 참조 앱과의 관계 `[미결정]` (부록 C).
-- `[미검증]` 지표 목표치(latency·tool accuracy 등) — 실측 전까지 미확정.
+- `[사실]` **Slice 0 완료 (v4.2)**: `harness/`·`configs/harness.yaml`·`scripts/smoke.py`·`tests/` 커밋 — unittest 5/5 통과, 실 Ollama 왕복 성공(local-jarvis-qwen3:8b, e2e ~7.8s), `data/traces/` gitignore 대상.
+- `[미검증]` tool accuracy·hallucination 등 지표 — tool slice 이후 실측 필요.
 
 ### 부록 B: 음성(STT/TTS) 확장 설계 원칙 — 추후 적용
 

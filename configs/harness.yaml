@@ -1,0 +1,17 @@
+# docs/harness-design.md §7.1 — runtime/model 교체는 여기만 바꾼다.
+# runtime: ollama | llama_cpp | openai | mock
+runtime: ollama
+model: local-jarvis-qwen3:8b
+# api_format: native_chat(ollama /api/chat, 참조 앱 사용) | openai_compat(/v1)
+api_format: native_chat
+base_url: http://127.0.0.1:11434
+profile: desktop
+timeout_s: 180
+
+generation:
+  temperature: 0.6
+  num_predict: 240
+
+trace:
+  enabled: true
+  dir: data/traces
