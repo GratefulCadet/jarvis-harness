@@ -1,8 +1,8 @@
 # JARVIS Local LLM — Harness Engineering Architecture
 
-- **상태**: 설계 v4.3 — Slice 0(로컬 왕복)·Slice 1(tool schema+검증+gate+`get_project_context`) 구현·검증 완료
+- **상태**: 설계 v4.4 — Slice 0(로컬 왕복)·Slice 1(tool schema+검증+gate+`get_project_context`)·Slice 2(모델 tool-call 루프) 구현·검증 완료
 - **작성일**: 2026-09-04
-- **갱신**: 2026-09-04 — §14 Slice 1 추가(`harness/tools/`, client tool 접점, tests 21개, `scripts/tool_check.py`)
+- **갱신**: 2026-09-04 — §14 Slice 2 추가(`HarnessClient.chat_with_tools`, adapter tool_calls, trace tool_results·turns, tests 29개, `scripts/tool_loop_check.py`)
 - **표기 규칙**: `[사실]` 확인된 사실 · `[제안]` 설계 제안 · `[미결정]` 아직 결정하지 않은 사항
 - **이 문서의 범위**: Harness Engineering 설계만. 이번 단계에서는 runtime 구현·패키지 설치·모델 다운로드·학습을 수행하지 않는다.
 
@@ -491,7 +491,7 @@ jarvis-local-llm-harness/          # 논리적 이름 (실제 경로는 FB_Soap_
 
 > Soup은 **단계 9부터** 등장한다. 초기 Harness(1–8)는 Soup 없이 동작해야 한다.
 > 참조 앱(local-jarvis, 부록 D) 기준으로 단계 2는 사실상 완료(runtime=Ollama, model=Qwen3-8B)이며, 단계 3–5는 참조 앱 개발 순서 2번 "Ollama wrapper"(현재 Phase 2 TODO)와 같은 작업이다. `[사실]`
-> 단계 6의 harness 측(4개 schema + 검증 + gate + `get_project_context` 실데이터 조회)은 Slice 1에서 완료 `[사실]` — 남은 것은 모델 tool-call 루프(§5)와 나머지 3개 handler(JARVIS 연동).
+> 단계 6의 harness 측은 Slice 1(4개 schema + 검증 + gate + `get_project_context` 실데이터 조회)·Slice 2(모델 tool-call 루프)에서 완료 `[사실]` — 남은 것은 나머지 3개 handler(JARVIS 연동).
 
 ---
 
@@ -550,7 +550,18 @@ jarvis-local-llm-harness/          # 논리적 이름 (실제 경로는 FB_Soap_
 - **완료 기준**:
   - `python -m unittest discover -s tests` → tool 검증·gate·memory 조회 테스트 통과
   - `python -m scripts.tool_check --project local-jarvis` → 실제 memory 파일 목록·내용 확인
-- **제외(다음 slice)**: 모델 tool-call 루프(LLM tool 선택 → 검증·gate → 실행 → tool result로 최종 응답, §5 sequenceDiagram), tool_results trace 기록(§9.1), `list_current_tasks` 등 나머지 handler(JARVIS 연동 단계)
+- **제외(다음 slice)**: `list_current_tasks`·`propose_next_action`·`create_task` handler(JARVIS 연동 단계) — 모델 tool-call 루프(§5)와 tool_results trace 기록(§9.1)은 Slice 2에서 완료
+
+### Slice 2 — "모델이 tool을 골라 호출하고, 그 결과로 최종 응답까지" (tool-call 루프)
+
+- **상태 (v4.4)**: 구현·검증 완료 `[사실]` — `HarnessClient.chat_with_tools()`(§5·§8.3: 모델 호출 → tool_calls → registry 검증·gate·실행 → 결과를 role=tool 메시지로 되돌림 → 최종 텍스트 답변까지 반복), adapter tool_calls 지원(ollama native `/api/chat` + openai_compat `/v1` — 중립 메시지↔wire 양방향 매핑), trace에 `tool_results`·`turns` 기록(§9.1), config `tool_loop_max_turns`, `tests/test_tool_loop.py`(8개, 전체 29/29), `scripts/tool_loop_check.py`
+- **종료 조건 (finish_reason)**: `stop`(정상 — tool_calls 없이 텍스트 답변) · `awaiting_confirmation`(write gate 차단 — tool_calls에 승인 대기 call 유지, handler 미실행, §8.3-2. 사용자 확인 후 `approve_write=True`로 재호출) · `tool_loop_limit`(max_turns 초과 — 마지막 turn의 tool 요청은 **실행하지 않고** 중단, §8.3-3)
+- **실패 피드백(§8.3-3)**: 검증 오류·알 수 없는 tool·handler 오류는 error 문구를 role=tool 메시지로 되돌려 모델이 수정·재시도하게 한다. write gate 차단만 모델이 해결할 수 없으므로 루프를 중단한다
+- **검증**: unittest 29/29 통과(scripted fake adapter — 직접 답변 1턴, tool→최종 답변 2턴, multi-call 배치 순서, 검증 실패·unknown tool 피드백, write gate 중단/승인, max_turns 중단 시 미실행 확인) + 실 Ollama `python -m scripts.tool_loop_check` 성공 — `local-jarvis-qwen3:8b`가 `get_project_context`를 실제로 호출, 실제 memory 조회 결과로 최종 요약 생성(turns=2, tool_results=1, e2e ~12.3s, trace JSON 확인)
+- **완료 기준**:
+  - `python -m unittest discover -s tests` → tool-call 루프 테스트 통과
+  - `python -m scripts.tool_loop_check` → "모델이 tool을 호출하고 tool result 기반 최종 답변을 생성했습니다" 확인 (model이 tool을 안 쓰면 exit 3 — 커스텀 Modelfile 템플릿 문제 감지용)
+- **제외(다음 slice)**: 나머지 3개 handler(JARVIS 연동), streaming(TTFT)·PII 필터(§9.2), correction 수집(§9.3)
 
 ---
 
@@ -561,6 +572,7 @@ jarvis-local-llm-harness/          # 논리적 이름 (실제 경로는 FB_Soap_
 - `[사실]` `jarvisSourceFiles/`는 React(JSX) UI 프로토타입 6개 — LLM·네트워크 호출 없음, OFFLINE placeholder. 참조 앱과의 관계 `[미결정]` (부록 C).
 - `[사실]` **Slice 0 완료 (v4.2)**: `harness/`·`configs/harness.yaml`·`scripts/smoke.py`·`tests/` 커밋 — unittest 5/5 통과, 실 Ollama 왕복 성공(local-jarvis-qwen3:8b, e2e ~7.8s), `data/traces/` gitignore 대상.
 - `[사실]` **Slice 1 완료 (v4.3)**: `harness/tools/`·client tool 접점·`configs/harness.yaml tools.memory_dir`·`tests/test_tools.py`(16개)·`scripts/tool_check.py` 커밋 — unittest 21/21, 실 memory 6파일 조회 확인(§14 Slice 1).
+- `[사실]` **Slice 2 완료 (v4.4)**: `HarnessClient.chat_with_tools()`(tool-call 루프)·adapter tool_calls(ollama native/openai_compat)·trace tool_results·turns·`tests/test_tool_loop.py`(8개, 전체 29/29)·`scripts/tool_loop_check.py` 커밋 — 실 Ollama에서 모델이 `get_project_context` 호출 → memory 조회 → 최종 요약 완결(§14 Slice 2).
 - `[미검증]` tool accuracy·hallucination 등 지표 — tool slice 이후 실측 필요.
 
 ### 부록 B: 음성(STT/TTS) 확장 설계 원칙 — 추후 적용

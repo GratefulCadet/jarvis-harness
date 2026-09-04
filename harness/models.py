@@ -15,6 +15,9 @@ class ToolSchema:
 class ToolCall:
     name: str
     arguments: dict[str, Any] = field(default_factory=dict)
+    # OpenAI-compatible wire가 tool 결과를 tool_call_id로 짝지을 때 사용.
+    # Ollama native(/api/chat)는 id 없이 순서로 짝지으므로 None이어도 된다.
+    id: str | None = None
 
 
 @dataclass

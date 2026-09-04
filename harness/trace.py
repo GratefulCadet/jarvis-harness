@@ -38,6 +38,8 @@ class TraceRecorder:
         *,
         meta: dict[str, Any] | None = None,
         error: str | None = None,
+        tool_results: list[Any] | None = None,
+        turns: int | None = None,
     ) -> Path | None:
         if not self._enabled:
             return None
@@ -67,6 +69,11 @@ class TraceRecorder:
             "latency_ms": {"e2e": latency_ms},
             "pii_filtered": False,  # §9.2 — 다음 slice에서 활성화
         }
+        # §9.1 tool_results·turns — Slice 2 chat_with_tools 루프에서 채움
+        if tool_results is not None:
+            entry["tool_results"] = [_serializable(item) for item in tool_results]
+        if turns is not None:
+            entry["turns"] = turns
         if meta:
             entry.update(meta)
 

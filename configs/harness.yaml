@@ -8,6 +8,9 @@ base_url: http://127.0.0.1:11434
 profile: desktop
 timeout_s: 180
 
+# Slice 2 — chat_with_tools tool-call 루프 최대 모델 호출 횟수 (§8.3-3)
+tool_loop_max_turns: 4
+
 generation:
   temperature: 0.6
   num_predict: 240

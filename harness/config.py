@@ -31,6 +31,8 @@ class HarnessConfig:
     trace_enabled: bool = True
     trace_dir: Path = field(default_factory=lambda: Path("data/traces"))
     prompt_version: str = "v0"
+    # Slice 2: chat_with_tools tool-call 루프의 최대 모델 호출 횟수 (§8.3-3 중단 기준)
+    tool_loop_max_turns: int = 4
     # Slice 1: get_project_context 문맥 원천 (local-jarvis memory/). None이면 tool 미등록 안내.
     memory_dir: Path | None = None
 
