@@ -146,16 +146,27 @@ class RegistryGateTests(unittest.TestCase):
             self.assertFalse(result.ok)
             self.assertIn("get_project_context", result.error)
 
-    def test_schema_only_tools_report_handler_missing(self) -> None:
+    def test_create_task_now_has_reference_handler(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
-            registry = registry_with_memory(Path(temp))
+            memory = make_memory_dir(Path(temp))
+            registry = build_default_registry(memory_dir=memory)
+            # confirm 없이 → gate 차단, handler 미실행, 파일 생성 없음 (§8.3-2)
             result = registry.execute(
                 "create_task",
                 {"project_id": "local-jarvis", "title": "t"},
-                approve_write=True,  # handler가 없어 gate와 무관하게 미등록 안내
             )
             self.assertFalse(result.ok)
-            self.assertIn("미등록", result.error)
+            self.assertTrue(result.requires_confirmation)
+            self.assertFalse((memory / "tasks.md").exists())
+            # 승인 → reference 저장소(memory/tasks.md)에 기록
+            approved = registry.execute(
+                "create_task",
+                {"project_id": "local-jarvis", "title": "t"},
+                approve_write=True,
+            )
+            self.assertTrue(approved.ok, approved.error)
+            self.assertTrue(approved.data["created"])
+            self.assertTrue((memory / "tasks.md").exists())
 
     def test_write_tool_blocked_without_confirmation(self) -> None:
         registry = ToolRegistry()

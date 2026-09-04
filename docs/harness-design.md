@@ -1,8 +1,8 @@
 # JARVIS Local LLM — Harness Engineering Architecture
 
-- **상태**: 설계 v4.5 — Slice 0(로컬 왕복)·Slice 1(tool schema+검증+gate+`get_project_context`)·Slice 2(모델 tool-call 루프)·Slice 3(자동 gate: test+diff 검사+PASS/FAIL+피드백 1회) 구현·검증 완료
+- **상태**: 설계 v4.6 — Slice 0(로컬 왕복)·Slice 1(tool schema+검증+gate+`get_project_context`)·Slice 2(모델 tool-call 루프)·Slice 3(자동 gate: test+diff 검사+PASS/FAIL+피드백 1회)·Slice 4(첫 상태 변경 tool `create_task`: confirm gate + 승인 후 정확한 call 1회 실행) 구현·검증 완료
 - **작성일**: 2026-09-04
-- **갱신**: 2026-09-04 — §14 Slice 3 추가(`scripts/gate.py`·`scripts/gate_loop.py`, tests 47개)
+- **갱신**: 2026-09-04 — §14 Slice 4 추가(`harness/tools/task_store.py`·`create_task.py`, `confirmed_calls` 승인 경로, tests 65개)
 - **표기 규칙**: `[사실]` 확인된 사실 · `[제안]` 설계 제안 · `[미결정]` 아직 결정하지 않은 사항
 - **이 문서의 범위**: Harness Engineering 설계만. 이번 단계에서는 runtime 구현·패키지 설치·모델 다운로드·학습을 수행하지 않는다.
 
@@ -491,7 +491,7 @@ jarvis-local-llm-harness/          # 논리적 이름 (실제 경로는 FB_Soap_
 
 > Soup은 **단계 9부터** 등장한다. 초기 Harness(1–8)는 Soup 없이 동작해야 한다.
 > 참조 앱(local-jarvis, 부록 D) 기준으로 단계 2는 사실상 완료(runtime=Ollama, model=Qwen3-8B)이며, 단계 3–5는 참조 앱 개발 순서 2번 "Ollama wrapper"(현재 Phase 2 TODO)와 같은 작업이다. `[사실]`
-> 단계 6의 harness 측은 Slice 1(4개 schema + 검증 + gate + `get_project_context` 실데이터 조회)·Slice 2(모델 tool-call 루프)에서 완료 `[사실]` — 남은 것은 나머지 3개 handler(JARVIS 연동).
+> 단계 6의 harness 측은 Slice 1(4개 schema + 검증 + gate + `get_project_context` 실데이터 조회)·Slice 2(모델 tool-call 루프)·Slice 4(`create_task` reference handler + confirm 흐름)에서 완료 `[사실]` — 남은 것은 `list_current_tasks`·`propose_next_action` 2개 handler(JARVIS 연동).
 
 ---
 
@@ -520,6 +520,7 @@ jarvis-local-llm-harness/          # 논리적 이름 (실제 경로는 FB_Soap_
 | 평가 지표 기준치 | tool accuracy·hallucination 목표 수치 미확정 `[미결정]` |
 | dataset 형식·분리 비율 | OpenAI 메시지 형식, 80/10/10 제안 `[제안]` — 확정 필요 |
 | correction 수집 UI 방식 | 기존 앱에 최소 침습으로 넣는 방법 `[미결정]` |
+| task 저장소 | 참조 앱에 task 추상화 없음 `[사실]` — Slice 4에서 앱의 markdown 관례대로 `memory/tasks.md` reference 저장소 구현·검증 완료(멱등 id, 원자 쓰기, 위치 제약 §8.4). JARVIS가 자체 저장소를 도입하면 동일 schema·gate로 handler 교체 `[제안]` |
 | 음성(STT/TTS) 통합 | 참조 앱에 faster-whisper + Windows Heami TTS 구현됨 `[사실]` — Harness 코어와 분리 원칙(부록 B) 유지, harness 연동 시점 `[미결정]` |
 | 실행 환경 상세 | RTX 4070 12GB, 단일 GPU `[사실]` — 참조 앱은 Windows 네이티브(PowerShell·`.venv\Scripts`) 흔적, WSL2 여부·Python 버전 `[미결정]` |
 
@@ -545,7 +546,7 @@ jarvis-local-llm-harness/          # 논리적 이름 (실제 경로는 FB_Soap_
 - **상태 (v4.3)**: 구현·검증 완료 `[사실]` — `harness/tools/`(schemas·registry·memory_context·get_project_context), client tool 접점(`register_tool`·`execute_tool`), config `tools.memory_dir`, `tests/test_tools.py`(16개, 전체 21/21), `scripts/tool_check.py`
 - **범위**: §8 tool 4개 schema + schema 검증(§8.3-1) + Permission Gate(§8.3-2: read 통과, write는 confirm 전 차단) + `get_project_context` 1개 read tool
 - **문맥 원천 결정 `[사실]`**: 참조 앱 `local-jarvis`의 `memory/*.md` — `projects.md`의 `## Active`를 프로젝트 목록으로 사용, unknown project는 Active 목록과 함께 오류 반환
-- **실행 경계(§8.2)**: handler는 "JARVIS가 등록할 실행 함수" 자리로 두고 Slice 1은 memory 대상 reference handler만 보유. 나머지 3개 tool은 schema-only 등록(명확한 안내 오류), `create_task`는 write 분류(handler 등록 시 confirm gate 적용)
+- **실행 경계(§8.2)**: handler는 "JARVIS가 등록할 실행 함수" 자리로 두고 Slice 1은 memory 대상 reference handler만 보유. 나머지 2개 tool(`list_current_tasks`·`propose_next_action`)은 schema-only 등록(명확한 안내 오류), `create_task`는 write 분류 — handler는 **Slice 4에서 등록**(§14 Slice 4, confirm gate 적용)
 - **검증**: unittest 21/21 통과(검증·gate·memory 파싱·client wiring), 실데이터 `python -m scripts.tool_check` 성공 — 실제 memory 6파일(business_context·profile·projects·rules·writing_style + chat_handoffs 1개) 조회 확인
 - **완료 기준**:
   - `python -m unittest discover -s tests` → tool 검증·gate·memory 조회 테스트 통과
@@ -570,10 +571,23 @@ jarvis-local-llm-harness/          # 논리적 이름 (실제 경로는 FB_Soap_
 - **검사 항목**: `compile`(compileall) · `tests`(unittest 전체 — 실패 테스트명+traceback 추출) · `diff_scope`(HEAD~1..HEAD + 미커밋 변경에서 금지 경로 FAIL, 과대 diff warn) · `secrets`(diff 추가 라인에서 sk-*/API key/private key 패턴 FAIL, 값은 마스킹) · `untracked`(경고)
 - **검증**: unittest 47/47(판정 함수 + 상태 머신 + 실 git 저장소 e2e: PASS → 테스트 고장 → FAIL+피드백 → 수정 → PASS(attempt 리셋) → 재고장 → BLOCKED) + 본 워크스페이스 `python -m scripts.gate_loop` PASS(commit `fca5dd3`, 10파일 842라인 diff 검사 통과, 시크릿 없음)
 - **운영 규칙**: 피드백 파일·상태·verdict는 `data/`(gitignore)에 저장되어 diff 검사를 오염시키지 않는다. FAIL 시 에이전트는 `data/gate_feedback.md`만 읽고 수정한 뒤 재실행 — "한 번 다시" 원칙(`max_attempts: 1`)
+- **개발 QA 경계 (v4.6 명시)**: 이 gate는 **개발 시점 QA 인프라**다 — JARVIS runtime 경로에서 호출되지 않는다(`harness/`·`client.py`에 gate import 없음). Freebuff는 이 프로젝트의 **개발 에이전트**일 뿐 JARVIS runtime 판단 에이전트가 아니다. runtime의 tool 선택·최종 판단은 항상 로컬 모델(Qwen)이 하고(`chat_with_tools` → adapter → Ollama), gate·Freebuff는 개발·검증에만 쓰인다.
 - **완료 기준**:
   - `python -m scripts.gate_loop` → 정상 상태 GATE PASS / 고장 상태 GATE FAIL + `data/gate_feedback.md` / 재시도 소진 GATE BLOCKED
   - `python -m unittest discover -s tests` → 전체 통과
 - **제외(다음 slice)**: streaming(TTFT)·PII 필터(§9.2), correction 수집(§9.3) — gate의 diff 검사는 §9.2(민감정보 제거)의 첫 실행형 방어선 역할
+
+### Slice 4 — "첫 상태 변경 tool: 사용자 요청 → 모델 제안 → confirm gate → 승인 → 정확한 1회 실행 → 최종 응답"
+
+- **상태 (v4.6)**: 구현·검증 완료 `[사실]` — `harness/tools/task_store.py`(memory/tasks.md reference 저장소: 멱등 id·원자 쓰기·위치 제약)·`create_task.py`(write tool builder)·`HarnessClient.chat_with_tools(confirmed_calls=...)`(승인 핸드오프)·config `tools.task_file`·`tests/test_task_store.py`(18개, 전체 65/65)·`scripts/create_task_check.py`
+- **조사 결과 `[사실]`**: 참조 앱(local-jarvis)에 **task 추상화·task 저장소가 없다** — 앱의 state 모델은 `memory/*.md`(projects.md의 `## Active`가 프로젝트 레지스트리). 따라서 병렬 DB를 만들지 않고 앱의 기존 markdown 관례를 따라 `memory/tasks.md`에 프로젝트별 섹션(`## <project_id>` + `- [ ] <id>: <title> — <reason>`)으로 기록한다. id는 (project_id, title, reason)의 결정적 해시 → 재시도해도 중복 생성되지 않음(멱등). 쓰기는 임시 파일 + `os.replace` 원자 교체, task_file은 **반드시 memory_dir 안**(§8.4 위치 제약), project_id는 Active 목록 + 안전 식별자 검증, title/reason은 빈 값·줄바꿈·길이 검증
+- **confirm 흐름 (§8.3-2 → §8.4)**: `chat_with_tools`가 write gate 차단 시 `awaiting_confirmation` + `tool_calls`에 **정확한 제안 call**을 유지하고 handler는 호출하지 않는다. JARVIS는 사용자 확인 후 그 `tool_calls`를 `confirmed_calls=`로 그대로 넘겨 재호출 — **모델 재판단 없이 정확히 그 call만** approve 상태로 실행되고(모델이 다른 write로 대체 불가), 결과를 role=tool 메시지로 되돌려 모델이 최종 답변을 생성한다. 이후 모델이 새로 제안하는 write는 다시 gate에 걸린다(1회 승인 = 1회 실행). `approve_write=True` 재호출(모델 재판단 경로)은 호환용으로 유지
+- **검증**: unittest 65/65(저장소 11개: 멱등·위치 제약·검증·기존 내용 보존 · 흐름 7개: 제안→차단 0변이·확정 call 보존·승인 1회 실행·재시도 중복 없음·잘못된 인자 무쓰기·미지정 tool 피드백·승인 후 새 제안 재차단·read tool 회귀) + 실 Ollama `python -m scripts.create_task_check` 성공 — `local-jarvis-qwen3:8b`가 `create_task`를 제안(차단, tasks.md 0변이) → `confirmed_calls` 승인 → 격리 scratch(memory/)에 정확히 1개 task 기록(`t-ffe62ef8ca85`) → 모델 최종 응답(turns=1, trace에 `loop.confirmed_calls` 기록 확인). 실제 앱 memory는 1바이트도 건드리지 않음(격리 memory + 안전 가드)
+- **발견·수정된 버그**: config 환경변수 우선순위가 문서와 반대였음(`HARNESS_MEMORY_DIR`이 YAML을 못 덮음) — v4.6에서 환경변수 > YAML로 수정, smoke 스크립트에 memory_dir 안전 가드 추가(실제 앱 memory로의 쓰기 사고 원천 차단)
+- **완료 기준**:
+  - `python -m unittest discover -s tests` → confirm 흐름 테스트 통과 (65/65)
+  - `python -m scripts.create_task_check` → "차단(0변이) → 승인(정확한 call 1회 실행) → 최종 응답 전 구간 확인"
+- **제외(다음 slice)**: `list_current_tasks`·`propose_next_action` handler(JARVIS 내부 로직), streaming·PII·correction, LoRA·학습 — **Freebuff/autorun/gate는 runtime에 연결하지 않음**(Slice 3 개발 QA 경계 유지)
 
 ---
 
@@ -585,7 +599,8 @@ jarvis-local-llm-harness/          # 논리적 이름 (실제 경로는 FB_Soap_
 - `[사실]` **Slice 0 완료 (v4.2)**: `harness/`·`configs/harness.yaml`·`scripts/smoke.py`·`tests/` 커밋 — unittest 5/5 통과, 실 Ollama 왕복 성공(local-jarvis-qwen3:8b, e2e ~7.8s), `data/traces/` gitignore 대상.
 - `[사실]` **Slice 1 완료 (v4.3)**: `harness/tools/`·client tool 접점·`configs/harness.yaml tools.memory_dir`·`tests/test_tools.py`(16개)·`scripts/tool_check.py` 커밋 — unittest 21/21, 실 memory 6파일 조회 확인(§14 Slice 1).
 - `[사실]` **Slice 2 완료 (v4.4)**: `HarnessClient.chat_with_tools()`(tool-call 루프)·adapter tool_calls(ollama native/openai_compat)·trace tool_results·turns·`tests/test_tool_loop.py`(8개, 전체 29/29)·`scripts/tool_loop_check.py` 커밋 — 실 Ollama에서 모델이 `get_project_context` 호출 → memory 조회 → 최종 요약 완결(§14 Slice 2).
-- `[사실]` **Slice 3 완료 (v4.5)**: `scripts/gate.py`·`scripts/gate_loop.py`·`configs/gate.yaml`·`tests/test_gate.py`(18개, 전체 47/47) 커밋 — 자동 gate(test+git diff 검사+PASS/FAIL)와 재시도 1회 피드백 루프 구현, 실 git 저장소 e2e로 FAIL→피드백→PASS→BLOCKED 전 구간 검증(§14 Slice 3).
+- `[사실]` **Slice 3 완료 (v4.5)**: `scripts/gate.py`·`scripts/gate_loop.py`·`configs/gate.yaml`·`tests/test_gate.py`(18개, 전체 47/47) 커밋 — 자동 gate(test+git diff 검사+PASS/FAIL)와 재시도 1회 피드백 루프 구현, 실 git 저장소 e2e로 FAIL→피드백→PASS→BLOCKED 전 구간 검증(§14 Slice 3). 개발 QA 경계(v4.6): runtime 미포함.
+- `[사실]` **Slice 4 완료 (v4.6)**: `harness/tools/task_store.py`·`create_task.py`·`confirmed_calls` 승인 경로·config `tools.task_file`·`tests/test_task_store.py`(18개, 전체 65/65)·`scripts/create_task_check.py` 커밋 — 첫 상태 변경 tool `create_task`를 memory/tasks.md reference 저장소로 구현, 실 Ollama로 차단(0변이)→승인(정확한 call 1회 실행)→최종 응답 전 구간 검증(§14 Slice 4).
 - `[미검증]` tool accuracy·hallucination 등 지표 — tool slice 이후 실측 필요.
 
 ### 부록 B: 음성(STT/TTS) 확장 설계 원칙 — 추후 적용

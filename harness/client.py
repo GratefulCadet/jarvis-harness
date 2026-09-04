@@ -56,7 +56,8 @@ class HarnessClient:
         # Slice 1 (§8): schema + 검증 + gate가 붙은 기본 tool set.
         # JARVIS는 register_tool()로 자체 handler를 추가/교체할 수 있다.
         self._tools = tools if tools is not None else build_default_registry(
-            memory_dir=self._config.memory_dir
+            memory_dir=self._config.memory_dir,
+            task_file=self._config.task_file,
         )
 
     @property
@@ -118,6 +119,7 @@ class HarnessClient:
         metadata: dict[str, Any] | None = None,
         max_turns: int | None = None,
         approve_write: bool = False,
+        confirmed_calls: Sequence[ToolCall | Mapping[str, Any]] | None = None,
     ) -> ChatResponse:
         """§5·§8.3 tool-call 루프 — JARVIS가 사용할 기본 접점.
 
@@ -128,9 +130,15 @@ class HarnessClient:
         - 모델이 tool_calls 없이 텍스트로 답하면 "stop" (정상 완료)
         - write tool이 confirm 없이 요청되면 "awaiting_confirmation" —
           tool_calls에 승인 대기 call 유지, handler는 호출되지 않음(§8.3-2).
-          JARVIS가 사용자 확인 후 approve_write=True로 재호출한다.
         - max_turns(기본 config.tool_loop_max_turns) 초과 시 "tool_loop_limit" —
           마지막 turn의 tool 요청은 실행하지 않고 중단 (§8.3-3).
+
+        승인 경로 (Slice 4, §8.4): awaiting_confirmation 응답을 받은 JARVIS는
+        사용자 확인 후 **confirmed_calls**에 해당 tool_calls를 그대로 넘겨 재호출한다.
+        이 경우 모델을 재호출하지 않고 **정확히 그 call만** approve 상태로 실행한 뒤
+        (모델이 다른 write로 대체할 수 없음) tool result를 바탕으로 모델이 최종
+        답변을 생성한다. 이후 모델이 새로 제안하는 write는 다시 gate에 걸린다.
+        approve_write=True 재호출(모델 재판단 경로)은 호환용으로 유지한다.
         """
         tool_schemas = list(tools) if tools is not None else self._tools.schemas()
         limit = max_turns if max_turns is not None else self._config.tool_loop_max_turns
@@ -138,12 +146,55 @@ class HarnessClient:
         working = [dict(message) for message in messages]
         trace_id = self._trace.new_trace_id()
         meta = self._meta()
-        meta["loop"] = {"max_turns": limit, "approve_write": approve_write}
+        loop_meta: dict[str, Any] = {"max_turns": limit, "approve_write": approve_write}
 
         tool_results: list[dict[str, Any]] = []
         turns = 0
         started = time.perf_counter()
         try:
+            if confirmed_calls:
+                normalized = [self._as_tool_call(call) for call in confirmed_calls]
+                loop_meta["confirmed_calls"] = [
+                    self._copy_call(call) for call in normalized
+                ]
+                # 승인된 call을 assistant tool_calls로 echo — 모델이 결과와 짝지을 수 있게
+                working.append({
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [self._copy_call(call) for call in normalized],
+                })
+                blocked = self._execute_tool_batch(
+                    working, normalized, tool_results, approve_write=True
+                )
+                if blocked:
+                    # 방어적: approve_write=True인데 gate가 다시 막을 수는 없지만,
+                    # 등록 해제 등 예외 상황 대비 (승인 대기 상태로 중단)
+                    final = ChatResponse(
+                        content=(
+                            f"승인된 call이 다시 차단되었습니다: "
+                            f"{', '.join(call.name for call in blocked)}"
+                        ),
+                        tool_calls=list(blocked),
+                        finish_reason="awaiting_confirmation",
+                        trace_id=trace_id,
+                    )
+                    latency_ms = int((time.perf_counter() - started) * 1000)
+                    self._trace.record(
+                        ChatRequest(
+                            messages=list(working),
+                            tools=tool_schemas,
+                            context=context,
+                            metadata=metadata or {},
+                            trace_id=trace_id,
+                        ),
+                        final, latency_ms,
+                        meta=meta, tool_results=tool_results, turns=turns,
+                    )
+                    return final
+                # 이후 모델이 새로 제안하는 write는 다시 confirm 필요
+                approve_write = False
+
+            meta["loop"] = loop_meta
             for _ in range(limit):
                 request = ChatRequest(
                     messages=working,
@@ -195,32 +246,10 @@ class HarnessClient:
                     ],
                 })
 
-                blocked: list[ToolCall] = []
-                for index, call in enumerate(response.tool_calls):
-                    call_id = call.id or f"call_{index}"
-                    result = self._tools.execute(
-                        call.name,
-                        call.arguments,
-                        approve_write=approve_write,
-                    )
-                    tool_results.append({
-                        "call": {
-                            "id": call_id,
-                            "name": call.name,
-                            "arguments": dict(call.arguments or {}),
-                        },
-                        "result": self._tool_result_dict(result),
-                    })
-                    if result.requires_confirmation:
-                        # write gate 차단 — 모델이 해결할 수 없으므로 루프 중단.
-                        # 나머지 tool_call은 실행하지 않는다 (§8.3-2).
-                        blocked.append(call)
-                        break
-                    working.append({
-                        "role": "tool",
-                        "tool_call_id": call_id,
-                        "content": _tool_message_content(result),
-                    })
+                blocked = self._execute_tool_batch(
+                    working, response.tool_calls, tool_results,
+                    approve_write=approve_write,
+                )
 
                 if blocked:
                     names = ", ".join(call.name for call in blocked)
@@ -274,6 +303,56 @@ class HarnessClient:
         response.trace_id = request.trace_id
         self._trace.record(request, response, latency_ms, meta=meta)
         return response
+
+    @staticmethod
+    def _as_tool_call(call: ToolCall | Mapping[str, Any]) -> ToolCall:
+        """ToolCall 또는 dict → ToolCall (confirmed_calls 정규화)."""
+        if isinstance(call, ToolCall):
+            return call
+        return ToolCall(
+            name=call["name"],
+            arguments=dict(call.get("arguments") or {}),
+            id=call.get("id"),
+        )
+
+    def _execute_tool_batch(
+        self,
+        working: list[dict[str, Any]],
+        calls: Sequence[ToolCall],
+        tool_results: list[dict[str, Any]],
+        *,
+        approve_write: bool,
+    ) -> list[ToolCall]:
+        """tool_calls 배치를 registry로 검증·gate·실행하고 결과를 working에 추가.
+
+        gate에 막힌 call이 있으면 그 지점에서 중단하고 막힌 call 목록을 반환한다
+        (나머지는 실행하지 않음 — §8.3-2). 반환값이 비면 전부 실행 완료.
+        """
+        blocked: list[ToolCall] = []
+        for index, call in enumerate(calls):
+            call_id = call.id or f"call_{index}"
+            result = self._tools.execute(
+                call.name,
+                call.arguments,
+                approve_write=approve_write,
+            )
+            tool_results.append({
+                "call": {
+                    "id": call_id,
+                    "name": call.name,
+                    "arguments": dict(call.arguments or {}),
+                },
+                "result": self._tool_result_dict(result),
+            })
+            if result.requires_confirmation:
+                blocked.append(call)
+                break
+            working.append({
+                "role": "tool",
+                "tool_call_id": call_id,
+                "content": _tool_message_content(result),
+            })
+        return blocked
 
     @staticmethod
     def _copy_call(call: ToolCall) -> dict[str, Any]:

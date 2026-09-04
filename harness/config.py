@@ -35,6 +35,8 @@ class HarnessConfig:
     tool_loop_max_turns: int = 4
     # Slice 1: get_project_context 문맥 원천 (local-jarvis memory/). None이면 tool 미등록 안내.
     memory_dir: Path | None = None
+    # Slice 4: create_task 저장 파일 (기본: <memory_dir>/tasks.md). None이면 memory_dir에서 유도.
+    task_file: Path | None = None
 
     @classmethod
     def load(cls, path: Path | str | None = None) -> "HarnessConfig":
@@ -55,9 +57,15 @@ class HarnessConfig:
         )
         flat["trace_enabled"] = trace.get("enabled", True)
         flat["trace_dir"] = trace.get("dir", "data/traces")
+        # 우선순위: 환경변수 > YAML > 기본값 (YAML 주석의 "재정의 가능"과 일치)
         flat["memory_dir"] = (
-            tools.get("memory_dir")
-            or os.environ.get("HARNESS_MEMORY_DIR")
+            os.environ.get("HARNESS_MEMORY_DIR")
+            or tools.get("memory_dir")
+            or None
+        )
+        flat["task_file"] = (
+            os.environ.get("HARNESS_TASK_FILE")
+            or tools.get("task_file")
             or None
         )
 
@@ -71,4 +79,7 @@ class HarnessConfig:
         if config.memory_dir:
             memory_dir = Path(config.memory_dir)
             config.memory_dir = memory_dir if memory_dir.is_absolute() else PROJECT_ROOT / memory_dir
+        if config.task_file:
+            task_file = Path(config.task_file)
+            config.task_file = task_file if task_file.is_absolute() else PROJECT_ROOT / task_file
         return config

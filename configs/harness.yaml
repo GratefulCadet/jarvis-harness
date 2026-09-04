@@ -19,7 +19,10 @@ trace:
   enabled: true
   dir: data/traces
 
-# §8 Slice 1 — get_project_context의 문맥 원천 (참조 앱 local-jarvis memory/).
+# §8 Slice 1·4 — tool 데이터 원천 (참조 앱 local-jarvis memory/).
 # 이 머신 전용 절대 경로 — HARNESS_MEMORY_DIR 환경변수로 재정의 가능.
+# get_project_context: memory/*.md 조회 (read)
+# create_task: 기본 저장 위치는 <memory_dir>/tasks.md (write, §8.3-2 confirm 필수).
+#   task_file은 반드시 memory_dir 안이어야 함(§8.4) — HARNESS_TASK_FILE로 재정의 가능.
 tools:
   memory_dir: C:/Users/USER/Desktop/AI_WORKSPACE/projects/local-jarvis/memory
