@@ -1,0 +1,24 @@
+# 자동 gate (§14 Slice 3): Freebuff 작업 결과 → test → git diff 검사 → PASS/FAIL → 피드백 1회
+# 사용: python -m scripts.gate_loop  (FAIL 시 data/gate_feedback.md, 재시도 1회)
+
+# diff 기준 — 직전 커밋과 비교 (없으면 root commit 대비)
+base_ref: HEAD~1
+
+# FAIL 시 재시도 횟수 ("한 번 다시"만 허용)
+max_attempts: 1
+
+# 이 경로가 diff에 포함되면 FAIL (data/는 개인 trace·피드백 — 커밋 금지)
+banned_paths:
+  - data/
+  - .freebuff/
+  - .agents/
+
+# diff 추가 라인에서 이 패턴이 보이면 FAIL
+secrets_patterns:
+  - "sk-[A-Za-z0-9]{16,}"
+  - "(?i)(api[_-]?key|secret|password|passwd|token)\\s*[:=]\\s*['\"][^'\"]{6,}"
+  - "AKIA[0-9A-Z]{16}"
+  - "-----BEGIN (RSA|EC|OPENSSH|PRIVATE) KEY-----"
+
+# 총 추가 라인이 이 값을 넘으면 warn (실패는 아님)
+max_added_lines: 2000

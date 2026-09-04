@@ -1,8 +1,8 @@
 # JARVIS Local LLM — Harness Engineering Architecture
 
-- **상태**: 설계 v4.4 — Slice 0(로컬 왕복)·Slice 1(tool schema+검증+gate+`get_project_context`)·Slice 2(모델 tool-call 루프) 구현·검증 완료
+- **상태**: 설계 v4.5 — Slice 0(로컬 왕복)·Slice 1(tool schema+검증+gate+`get_project_context`)·Slice 2(모델 tool-call 루프)·Slice 3(자동 gate: test+diff 검사+PASS/FAIL+피드백 1회) 구현·검증 완료
 - **작성일**: 2026-09-04
-- **갱신**: 2026-09-04 — §14 Slice 2 추가(`HarnessClient.chat_with_tools`, adapter tool_calls, trace tool_results·turns, tests 29개, `scripts/tool_loop_check.py`)
+- **갱신**: 2026-09-04 — §14 Slice 3 추가(`scripts/gate.py`·`scripts/gate_loop.py`, tests 47개)
 - **표기 규칙**: `[사실]` 확인된 사실 · `[제안]` 설계 제안 · `[미결정]` 아직 결정하지 않은 사항
 - **이 문서의 범위**: Harness Engineering 설계만. 이번 단계에서는 runtime 구현·패키지 설치·모델 다운로드·학습을 수행하지 않는다.
 
@@ -563,6 +563,18 @@ jarvis-local-llm-harness/          # 논리적 이름 (실제 경로는 FB_Soap_
   - `python -m scripts.tool_loop_check` → "모델이 tool을 호출하고 tool result 기반 최종 답변을 생성했습니다" 확인 (model이 tool을 안 쓰면 exit 3 — 커스텀 Modelfile 템플릿 문제 감지용)
 - **제외(다음 slice)**: 나머지 3개 handler(JARVIS 연동), streaming(TTFT)·PII 필터(§9.2), correction 수집(§9.3)
 
+### Slice 3 — "자동 gate: 작업 결과 → test → git diff 검사 → PASS/FAIL → 피드백 1회"
+
+- **상태 (v4.5)**: 구현·검증 완료 `[사실]` — `scripts/gate.py`(검사: compile·tests·diff_scope·secrets + untracked 경고, 판단은 전부 결정적 코드) · `scripts/gate_loop.py`(재시도 1회 상태 머신 — FAIL 시 `data/gate_feedback.md` 한국어 피드백 작성, 재시도 소진 시 `data/gate_blocked.md` + exit 2) · `configs/gate.yaml`(금지 경로 `data/`·`.freebuff/`·`.agents/`, 시크릿 패턴, `max_attempts: 1`) · `tests/test_gate.py`(18개, 전체 47/47)
+- **자동화된 검증 루프(§9 평가 인프라의 첫 실행형 조각)**: Freebuff 작업 커밋 → `python -m scripts.gate_loop` → PASS(exit 0, 상태 리셋) | FAIL(exit 1, `data/gate_feedback.md` — 에이전트가 읽고 한 번만 수정) | 재실행 후에도 FAIL → BLOCKED(exit 2, 수동 검토)
+- **검사 항목**: `compile`(compileall) · `tests`(unittest 전체 — 실패 테스트명+traceback 추출) · `diff_scope`(HEAD~1..HEAD + 미커밋 변경에서 금지 경로 FAIL, 과대 diff warn) · `secrets`(diff 추가 라인에서 sk-*/API key/private key 패턴 FAIL, 값은 마스킹) · `untracked`(경고)
+- **검증**: unittest 47/47(판정 함수 + 상태 머신 + 실 git 저장소 e2e: PASS → 테스트 고장 → FAIL+피드백 → 수정 → PASS(attempt 리셋) → 재고장 → BLOCKED) + 본 워크스페이스 `python -m scripts.gate_loop` PASS(commit `fca5dd3`, 10파일 842라인 diff 검사 통과, 시크릿 없음)
+- **운영 규칙**: 피드백 파일·상태·verdict는 `data/`(gitignore)에 저장되어 diff 검사를 오염시키지 않는다. FAIL 시 에이전트는 `data/gate_feedback.md`만 읽고 수정한 뒤 재실행 — "한 번 다시" 원칙(`max_attempts: 1`)
+- **완료 기준**:
+  - `python -m scripts.gate_loop` → 정상 상태 GATE PASS / 고장 상태 GATE FAIL + `data/gate_feedback.md` / 재시도 소진 GATE BLOCKED
+  - `python -m unittest discover -s tests` → 전체 통과
+- **제외(다음 slice)**: streaming(TTFT)·PII 필터(§9.2), correction 수집(§9.3) — gate의 diff 검사는 §9.2(민감정보 제거)의 첫 실행형 방어선 역할
+
 ---
 
 ### 부록 A: 이 문서의 검증 상태 (v4)
@@ -573,6 +585,7 @@ jarvis-local-llm-harness/          # 논리적 이름 (실제 경로는 FB_Soap_
 - `[사실]` **Slice 0 완료 (v4.2)**: `harness/`·`configs/harness.yaml`·`scripts/smoke.py`·`tests/` 커밋 — unittest 5/5 통과, 실 Ollama 왕복 성공(local-jarvis-qwen3:8b, e2e ~7.8s), `data/traces/` gitignore 대상.
 - `[사실]` **Slice 1 완료 (v4.3)**: `harness/tools/`·client tool 접점·`configs/harness.yaml tools.memory_dir`·`tests/test_tools.py`(16개)·`scripts/tool_check.py` 커밋 — unittest 21/21, 실 memory 6파일 조회 확인(§14 Slice 1).
 - `[사실]` **Slice 2 완료 (v4.4)**: `HarnessClient.chat_with_tools()`(tool-call 루프)·adapter tool_calls(ollama native/openai_compat)·trace tool_results·turns·`tests/test_tool_loop.py`(8개, 전체 29/29)·`scripts/tool_loop_check.py` 커밋 — 실 Ollama에서 모델이 `get_project_context` 호출 → memory 조회 → 최종 요약 완결(§14 Slice 2).
+- `[사실]` **Slice 3 완료 (v4.5)**: `scripts/gate.py`·`scripts/gate_loop.py`·`configs/gate.yaml`·`tests/test_gate.py`(18개, 전체 47/47) 커밋 — 자동 gate(test+git diff 검사+PASS/FAIL)와 재시도 1회 피드백 루프 구현, 실 git 저장소 e2e로 FAIL→피드백→PASS→BLOCKED 전 구간 검증(§14 Slice 3).
 - `[미검증]` tool accuracy·hallucination 등 지표 — tool slice 이후 실측 필요.
 
 ### 부록 B: 음성(STT/TTS) 확장 설계 원칙 — 추후 적용
