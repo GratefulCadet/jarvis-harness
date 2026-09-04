@@ -595,6 +595,18 @@ jarvis-local-llm-harness/          # 논리적 이름 (실제 경로는 FB_Soap_
 - **실 앱 통합 (부분) `[사실]`**: 참조 앱(`local-jarvis`, 부록 D)에 최소 수직 슬라이스 구현 — 신규 `tools/harness_bridge.py`(opt-in) + `voice_assistant.py`의 `run_text_turn()`에 훅 추가. `HARNESS_HOME` 미설정이면 기존 직접 Ollama 경로(무변경), 설정이면 텍스트 턴이 `HarnessClient.chat_with_tools()`를 거쳐 승인 대기 → `confirmed_calls` 승인 → 정확한 1회 실행 → 최종 응답. 음성 루프(`run_assistant`)와 직접 Ollama 호출은 그대로 유지(폴백). 실측: y → scratch tasks.md에 정확히 1개 기록, n → 0변이, HARNESS_HOME 미설정 → 직접 Ollama 응답, 앱 자체 테스트 5/5 통과
 - **통합 경계 `[사실]`**: 지금까지의 실 사용 경로는 (1) 데모 스크립트, (2) 앱 `--text`/`--audio-file` CLI. UI 버튼 승인은 없다 — 승인은 터미널 `input()`. 음성(마이크) 루프는 아직 harness를 거치지 않는다. 앱 변경분은 앱 트리에 git 저장소가 없어 이 저장소에 커밋되지 않았음 — 실 저장소(원격)에 반영 시 `tools/harness_bridge.py` + `run_text_turn` 훅 2개 파일을 가져갈 것
 
+### Slice 5 — "read-side 동반자: 현재 task 목록 조회 + 전체 수명주기 스모크" (v4.8)
+
+- **상태 (v4.8)**: 구현·검증 완료 `[사실]` — `harness/tools/list_current_tasks.py`(read tool builder, `create_task`와 동일한 `TaskStore`·memory/tasks.md 사용) 등록(`harness/tools/__init__.py`에서 schema-only 스텁 → 실 handler 교체) · `tests/test_tools.py`의 `ListCurrentTasksTests`(9개)·`tests/test_lifecycle.py`(2개, 전체 76/76) · `scripts/list_tasks_check.py`(read 전용 스모크) · `scripts/lifecycle_check.py`(전체 수명주기 스모크 + 관찰 transcript)
+- **list_current_tasks 설계 `[사실]`**: read 분류 → confirm 불필요(§8.3-2). 같은 저장소(`memory/tasks.md`)만 사용, project filter, tasks.md 없으면 빈 목록, 형식 불일치 줄은 무시(안전). "현재 진행 중" = 완료(`[x]`) 제외. project_id는 create_task와 동일 검증(Active 목록 + 안전 식별자)
+- **수명주기 (Task 2) `[사실]`**: USER REQUEST → Qwen이 `list_current_tasks`로 기존 task 확인 → `create_task` 제안 → Permission Gate `awaiting_confirmation`(tasks.md 바이트 불변 = 0변이) → `confirmed_calls` 승인 → 제안된 call만 정확히 1회 실행(open task 1→2) → `list_current_tasks` read-back(count=2) → Qwen 최종 응답(tool 결과 근거). 결정적 테스트(fake adapter) + 실 Ollama `python -m scripts.lifecycle_check` 모두 통과, trace 3개(phase별) 기록
+- **발견·수정된 버그 `[사실]`**: `task_store._parse`가 reason 없는 엔트리(`- [ ] <id>: <title>`)의 제목을 reason으로 오기록 — title 복원 수정. `<id>: ` 구분자가 없는 줄은 docstring 계약대로 무시하도록 가드 추가
+- **완료 기준**:
+  - `python -m unittest discover -s tests` → 76/76 통과
+  - `python -m scripts.list_tasks_check` → read-only·filter·grounding 확인
+  - `python -m scripts.lifecycle_check` → 0변이 → 승인 1회 실행 → read-back → Qwen 최종 응답
+- **제외(다음 slice)**: `propose_next_action` handler(JARVIS 내부 로직), streaming·PII·correction, LoRA·학습 — **Freebuff/autorun/gate는 runtime에 연결하지 않음**(Slice 3 개발 QA 경계 유지)
+
 ---
 
 ### 부록 A: 이 문서의 검증 상태 (v4)
@@ -608,6 +620,7 @@ jarvis-local-llm-harness/          # 논리적 이름 (실제 경로는 FB_Soap_
 - `[사실]` **Slice 3 완료 (v4.5)**: `scripts/gate.py`·`scripts/gate_loop.py`·`configs/gate.yaml`·`tests/test_gate.py`(18개, 전체 47/47) 커밋 — 자동 gate(test+git diff 검사+PASS/FAIL)와 재시도 1회 피드백 루프 구현, 실 git 저장소 e2e로 FAIL→피드백→PASS→BLOCKED 전 구간 검증(§14 Slice 3). 개발 QA 경계(v4.6): runtime 미포함.
 - `[사실]` **Slice 4 완료 (v4.6)**: `harness/tools/task_store.py`·`create_task.py`·`confirmed_calls` 승인 경로·config `tools.task_file`·`tests/test_task_store.py`(18개, 전체 65/65)·`scripts/create_task_check.py` 커밋 — 첫 상태 변경 tool `create_task`를 memory/tasks.md reference 저장소로 구현, 실 Ollama로 차단(0변이)→승인(정확한 call 1회 실행)→최종 응답 전 구간 검증(§14 Slice 4).
 - `[사실]` **Slice 4 실 사용 경로 (v4.7)**: `scripts/create_task_demo.py`(대화형 데모 — y/n 실측) 커밋 + 실 앱 수직 슬라이스(`local-jarvis/tools/harness_bridge.py`, `run_text_turn` 훅 — 앱 트리에 git 없어 미커밋, 원격 반영 필요). 실 앱 `--text`가 `HARNESS_HOME` 설정 시 harness 경로로 동작, 미설정/오류 시 직접 Ollama 폴백, 앱 테스트 5/5 통과(§14 Slice 4 실 사용 경로).
+- `[사실]` **Slice 5 완료 (v4.8)**: `harness/tools/list_current_tasks.py`·등록 교체·`tests/test_tools.py`(+9)·`tests/test_lifecycle.py`(+2, 전체 76/76)·`scripts/list_tasks_check.py`·`scripts/lifecycle_check.py` 커밋 — `create_task`의 read-side 동반자(list_current_tasks) 구현 + 전체 task 수명주기(읽기→제안→0변이 차단→승인 1회 실행→read-back→Qwen 답변) 실 Ollama 검증(§14 Slice 5).
 - `[미검증]` tool accuracy·hallucination 등 지표 — tool slice 이후 실측 필요.
 
 ### 부록 B: 음성(STT/TTS) 확장 설계 원칙 — 추후 적용
