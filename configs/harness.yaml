@@ -15,3 +15,8 @@ generation:
 trace:
   enabled: true
   dir: data/traces
+
+# §8 Slice 1 — get_project_context의 문맥 원천 (참조 앱 local-jarvis memory/).
+# 이 머신 전용 절대 경로 — HARNESS_MEMORY_DIR 환경변수로 재정의 가능.
+tools:
+  memory_dir: C:/Users/USER/Desktop/AI_WORKSPACE/projects/local-jarvis/memory

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -30,6 +31,8 @@ class HarnessConfig:
     trace_enabled: bool = True
     trace_dir: Path = field(default_factory=lambda: Path("data/traces"))
     prompt_version: str = "v0"
+    # Slice 1: get_project_context 문맥 원천 (local-jarvis memory/). None이면 tool 미등록 안내.
+    memory_dir: Path | None = None
 
     @classmethod
     def load(cls, path: Path | str | None = None) -> "HarnessConfig":
@@ -42,6 +45,7 @@ class HarnessConfig:
 
         trace = raw.pop("trace", {}) or {}
         generation = raw.pop("generation", {}) or {}
+        tools = raw.pop("tools", {}) or {}
 
         flat: dict[str, Any] = dict(raw)
         flat.update(
@@ -49,6 +53,11 @@ class HarnessConfig:
         )
         flat["trace_enabled"] = trace.get("enabled", True)
         flat["trace_dir"] = trace.get("dir", "data/traces")
+        flat["memory_dir"] = (
+            tools.get("memory_dir")
+            or os.environ.get("HARNESS_MEMORY_DIR")
+            or None
+        )
 
         known = {dataclass_field.name for dataclass_field in dataclasses.fields(cls)}
         values = {key: value for key, value in flat.items() if key in known}
@@ -57,4 +66,7 @@ class HarnessConfig:
         trace_dir = Path(config.trace_dir)
         if not trace_dir.is_absolute():
             config.trace_dir = PROJECT_ROOT / trace_dir
+        if config.memory_dir:
+            memory_dir = Path(config.memory_dir)
+            config.memory_dir = memory_dir if memory_dir.is_absolute() else PROJECT_ROOT / memory_dir
         return config

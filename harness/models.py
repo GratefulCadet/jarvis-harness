@@ -23,6 +23,9 @@ class ToolResult:
     ok: bool
     data: dict[str, Any] | None = None
     error: str | None = None
+    # Permission Gate (§8.3): write tool이 사용자 confirm 없이 실행 요청되면 True.
+    # True면 ok=False이며 handler는 호출되지 않았다.
+    requires_confirmation: bool = False
 
 
 @dataclass

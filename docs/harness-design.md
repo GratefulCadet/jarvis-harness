@@ -1,8 +1,8 @@
 # JARVIS Local LLM — Harness Engineering Architecture
 
-- **상태**: 설계 v4 — 참조 앱(`local-jarvis`) 검토 반영, v3의 "UI 스냅샷=앱" 오독 교정
+- **상태**: 설계 v4.3 — Slice 0(로컬 왕복)·Slice 1(tool schema+검증+gate+`get_project_context`) 구현·검증 완료
 - **작성일**: 2026-09-04
-- **갱신**: 2026-09-04 — `Desktop/AI_WORKSPACE/projects/local-jarvis`를 read-only 참조로 검토 → §6.4·§7·§12·§13·부록 A·C·D 갱신
+- **갱신**: 2026-09-04 — §14 Slice 1 추가(`harness/tools/`, client tool 접점, tests 21개, `scripts/tool_check.py`)
 - **표기 규칙**: `[사실]` 확인된 사실 · `[제안]` 설계 제안 · `[미결정]` 아직 결정하지 않은 사항
 - **이 문서의 범위**: Harness Engineering 설계만. 이번 단계에서는 runtime 구현·패키지 설치·모델 다운로드·학습을 수행하지 않는다.
 
@@ -491,6 +491,7 @@ jarvis-local-llm-harness/          # 논리적 이름 (실제 경로는 FB_Soap_
 
 > Soup은 **단계 9부터** 등장한다. 초기 Harness(1–8)는 Soup 없이 동작해야 한다.
 > 참조 앱(local-jarvis, 부록 D) 기준으로 단계 2는 사실상 완료(runtime=Ollama, model=Qwen3-8B)이며, 단계 3–5는 참조 앱 개발 순서 2번 "Ollama wrapper"(현재 Phase 2 TODO)와 같은 작업이다. `[사실]`
+> 단계 6의 harness 측(4개 schema + 검증 + gate + `get_project_context` 실데이터 조회)은 Slice 1에서 완료 `[사실]` — 남은 것은 모델 tool-call 루프(§5)와 나머지 3개 handler(JARVIS 연동).
 
 ---
 
@@ -539,6 +540,18 @@ jarvis-local-llm-harness/          # 논리적 이름 (실제 경로는 FB_Soap_
 - **adapter**: ollama `native_chat`(`/api/chat` — 참조 앱 `ask_ollama`와 동일 형식), `openai_compat`(`/v1` — llama.cpp/원격용), `mock`(오프라인 테스트)
 - **다음 slice**: tool schema + 검증 + gate + `get_project_context` 1개 read tool end-to-end
 
+### Slice 1 — "read tool 1개를 실제 문맥 데이터로 end-to-end"
+
+- **상태 (v4.3)**: 구현·검증 완료 `[사실]` — `harness/tools/`(schemas·registry·memory_context·get_project_context), client tool 접점(`register_tool`·`execute_tool`), config `tools.memory_dir`, `tests/test_tools.py`(16개, 전체 21/21), `scripts/tool_check.py`
+- **범위**: §8 tool 4개 schema + schema 검증(§8.3-1) + Permission Gate(§8.3-2: read 통과, write는 confirm 전 차단) + `get_project_context` 1개 read tool
+- **문맥 원천 결정 `[사실]`**: 참조 앱 `local-jarvis`의 `memory/*.md` — `projects.md`의 `## Active`를 프로젝트 목록으로 사용, unknown project는 Active 목록과 함께 오류 반환
+- **실행 경계(§8.2)**: handler는 "JARVIS가 등록할 실행 함수" 자리로 두고 Slice 1은 memory 대상 reference handler만 보유. 나머지 3개 tool은 schema-only 등록(명확한 안내 오류), `create_task`는 write 분류(handler 등록 시 confirm gate 적용)
+- **검증**: unittest 21/21 통과(검증·gate·memory 파싱·client wiring), 실데이터 `python -m scripts.tool_check` 성공 — 실제 memory 6파일(business_context·profile·projects·rules·writing_style + chat_handoffs 1개) 조회 확인
+- **완료 기준**:
+  - `python -m unittest discover -s tests` → tool 검증·gate·memory 조회 테스트 통과
+  - `python -m scripts.tool_check --project local-jarvis` → 실제 memory 파일 목록·내용 확인
+- **제외(다음 slice)**: 모델 tool-call 루프(LLM tool 선택 → 검증·gate → 실행 → tool result로 최종 응답, §5 sequenceDiagram), tool_results trace 기록(§9.1), `list_current_tasks` 등 나머지 handler(JARVIS 연동 단계)
+
 ---
 
 ### 부록 A: 이 문서의 검증 상태 (v4)
@@ -547,6 +560,7 @@ jarvis-local-llm-harness/          # 논리적 이름 (실제 경로는 FB_Soap_
 - `[사실]` 참조 앱: `Desktop/AI_WORKSPACE/projects/local-jarvis` (read-only 지정, 수정 금지) — Python + Ollama + 음성. 상세는 부록 D.
 - `[사실]` `jarvisSourceFiles/`는 React(JSX) UI 프로토타입 6개 — LLM·네트워크 호출 없음, OFFLINE placeholder. 참조 앱과의 관계 `[미결정]` (부록 C).
 - `[사실]` **Slice 0 완료 (v4.2)**: `harness/`·`configs/harness.yaml`·`scripts/smoke.py`·`tests/` 커밋 — unittest 5/5 통과, 실 Ollama 왕복 성공(local-jarvis-qwen3:8b, e2e ~7.8s), `data/traces/` gitignore 대상.
+- `[사실]` **Slice 1 완료 (v4.3)**: `harness/tools/`·client tool 접점·`configs/harness.yaml tools.memory_dir`·`tests/test_tools.py`(16개)·`scripts/tool_check.py` 커밋 — unittest 21/21, 실 memory 6파일 조회 확인(§14 Slice 1).
 - `[미검증]` tool accuracy·hallucination 등 지표 — tool slice 이후 실측 필요.
 
 ### 부록 B: 음성(STT/TTS) 확장 설계 원칙 — 추후 적용
