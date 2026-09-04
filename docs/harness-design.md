@@ -1,8 +1,8 @@
 # JARVIS Local LLM — Harness Engineering Architecture
 
-- **상태**: 설계 v4.6 — Slice 0(로컬 왕복)·Slice 1(tool schema+검증+gate+`get_project_context`)·Slice 2(모델 tool-call 루프)·Slice 3(자동 gate: test+diff 검사+PASS/FAIL+피드백 1회)·Slice 4(첫 상태 변경 tool `create_task`: confirm gate + 승인 후 정확한 call 1회 실행) 구현·검증 완료
+- **상태**: 설계 v4.7 — Slice 0(로컬 왕복)·Slice 1(tool schema+검증+gate+`get_project_context`)·Slice 2(모델 tool-call 루프)·Slice 3(자동 gate)·Slice 4(첫 상태 변경 tool `create_task`: confirm gate + 승인 후 정확한 call 1회 실행) 구현·검증 완료. **실 앱 통합: 부분 완료** — 실 JARVIS 앱의 텍스트 경로가 opt-in(`HARNESS_HOME`)으로 HarnessClient를 거친다(부록 D·§14 Slice 4)
 - **작성일**: 2026-09-04
-- **갱신**: 2026-09-04 — §14 Slice 4 추가(`harness/tools/task_store.py`·`create_task.py`, `confirmed_calls` 승인 경로, tests 65개)
+- **갱신**: 2026-09-04 — v4.7: 대화형 데모 `scripts/create_task_demo.py` + 실 앱 수직 슬라이스(`tools/harness_bridge.py`·`run_text_turn` 훅, 폴백 유지)
 - **표기 규칙**: `[사실]` 확인된 사실 · `[제안]` 설계 제안 · `[미결정]` 아직 결정하지 않은 사항
 - **이 문서의 범위**: Harness Engineering 설계만. 이번 단계에서는 runtime 구현·패키지 설치·모델 다운로드·학습을 수행하지 않는다.
 
@@ -589,6 +589,12 @@ jarvis-local-llm-harness/          # 논리적 이름 (실제 경로는 FB_Soap_
   - `python -m scripts.create_task_check` → "차단(0변이) → 승인(정확한 call 1회 실행) → 최종 응답 전 구간 확인"
 - **제외(다음 slice)**: `list_current_tasks`·`propose_next_action` handler(JARVIS 내부 로직), streaming·PII·correction, LoRA·학습 — **Freebuff/autorun/gate는 runtime에 연결하지 않음**(Slice 3 개발 QA 경계 유지)
 
+### Slice 4 실 사용 경로 — 대화형 데모 + 실 앱 수직 슬라이스 (v4.7)
+
+- **대화형 데모 `[사실]`**: `python -m scripts.create_task_demo` — 실제 `local-jarvis-qwen3:8b`로 USER REQUEST → QWEN TOOL CALL → AWAITING CONFIRMATION(변이 0) → `Approve? [y/N]`에서 멈춤 → TASK CREATED(tasks.md 출력) → QWEN FINAL RESPONSE → TRACE PATH까지 전 구간을 사용자가 직접 눈으로 확인. 기본 격리 scratch(`data/smoke_memory`), `--keep`로 보존. y·n 양쪽 실측 완료
+- **실 앱 통합 (부분) `[사실]`**: 참조 앱(`local-jarvis`, 부록 D)에 최소 수직 슬라이스 구현 — 신규 `tools/harness_bridge.py`(opt-in) + `voice_assistant.py`의 `run_text_turn()`에 훅 추가. `HARNESS_HOME` 미설정이면 기존 직접 Ollama 경로(무변경), 설정이면 텍스트 턴이 `HarnessClient.chat_with_tools()`를 거쳐 승인 대기 → `confirmed_calls` 승인 → 정확한 1회 실행 → 최종 응답. 음성 루프(`run_assistant`)와 직접 Ollama 호출은 그대로 유지(폴백). 실측: y → scratch tasks.md에 정확히 1개 기록, n → 0변이, HARNESS_HOME 미설정 → 직접 Ollama 응답, 앱 자체 테스트 5/5 통과
+- **통합 경계 `[사실]`**: 지금까지의 실 사용 경로는 (1) 데모 스크립트, (2) 앱 `--text`/`--audio-file` CLI. UI 버튼 승인은 없다 — 승인은 터미널 `input()`. 음성(마이크) 루프는 아직 harness를 거치지 않는다. 앱 변경분은 앱 트리에 git 저장소가 없어 이 저장소에 커밋되지 않았음 — 실 저장소(원격)에 반영 시 `tools/harness_bridge.py` + `run_text_turn` 훅 2개 파일을 가져갈 것
+
 ---
 
 ### 부록 A: 이 문서의 검증 상태 (v4)
@@ -601,6 +607,7 @@ jarvis-local-llm-harness/          # 논리적 이름 (실제 경로는 FB_Soap_
 - `[사실]` **Slice 2 완료 (v4.4)**: `HarnessClient.chat_with_tools()`(tool-call 루프)·adapter tool_calls(ollama native/openai_compat)·trace tool_results·turns·`tests/test_tool_loop.py`(8개, 전체 29/29)·`scripts/tool_loop_check.py` 커밋 — 실 Ollama에서 모델이 `get_project_context` 호출 → memory 조회 → 최종 요약 완결(§14 Slice 2).
 - `[사실]` **Slice 3 완료 (v4.5)**: `scripts/gate.py`·`scripts/gate_loop.py`·`configs/gate.yaml`·`tests/test_gate.py`(18개, 전체 47/47) 커밋 — 자동 gate(test+git diff 검사+PASS/FAIL)와 재시도 1회 피드백 루프 구현, 실 git 저장소 e2e로 FAIL→피드백→PASS→BLOCKED 전 구간 검증(§14 Slice 3). 개발 QA 경계(v4.6): runtime 미포함.
 - `[사실]` **Slice 4 완료 (v4.6)**: `harness/tools/task_store.py`·`create_task.py`·`confirmed_calls` 승인 경로·config `tools.task_file`·`tests/test_task_store.py`(18개, 전체 65/65)·`scripts/create_task_check.py` 커밋 — 첫 상태 변경 tool `create_task`를 memory/tasks.md reference 저장소로 구현, 실 Ollama로 차단(0변이)→승인(정확한 call 1회 실행)→최종 응답 전 구간 검증(§14 Slice 4).
+- `[사실]` **Slice 4 실 사용 경로 (v4.7)**: `scripts/create_task_demo.py`(대화형 데모 — y/n 실측) 커밋 + 실 앱 수직 슬라이스(`local-jarvis/tools/harness_bridge.py`, `run_text_turn` 훅 — 앱 트리에 git 없어 미커밋, 원격 반영 필요). 실 앱 `--text`가 `HARNESS_HOME` 설정 시 harness 경로로 동작, 미설정/오류 시 직접 Ollama 폴백, 앱 테스트 5/5 통과(§14 Slice 4 실 사용 경로).
 - `[미검증]` tool accuracy·hallucination 등 지표 — tool slice 이후 실측 필요.
 
 ### 부록 B: 음성(STT/TTS) 확장 설계 원칙 — 추후 적용
