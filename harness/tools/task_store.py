@@ -190,12 +190,18 @@ class TaskStore:
                 continue
             done = match.group(1) == "x"
             rest = match.group(2).strip()
-            task_id, _, title_part = rest.partition(": ")
-            title, _, reason = title_part.rpartition(" — ")
+            # 형식: `- [ ] <id>: <title> — <reason>` — reason은 선택.
+            # `<id>: ` 부분이 없으면 형식 불일치로 무시한다(안전).
+            task_id, sep_id, title_part = rest.partition(": ")
+            if not sep_id:
+                continue
+            title, sep, reason = title_part.rpartition(" — ")
+            if not sep:
+                title, reason = title_part, ""
             entries.append({
                 "id": task_id.strip(),
                 "project_id": current,
-                "title": (title if reason else title_part).strip(),
+                "title": title.strip(),
                 "reason": reason.strip() if reason else "",
                 "done": done,
             })
