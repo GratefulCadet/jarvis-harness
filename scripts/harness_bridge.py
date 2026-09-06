@@ -38,6 +38,8 @@ from typing import Any, Callable, TextIO
 
 from harness.client import HarnessClient
 from harness.config import PROJECT_ROOT, HarnessConfig
+from harness.tools.memory_context import MemoryContextReader
+from harness.tools.task_store import TaskStore
 
 DEFAULT_PROJECT = "jarvis-app"
 DEFAULT_SCRATCH = PROJECT_ROOT / "data" / "electron_scratch"
@@ -134,6 +136,66 @@ def _trace_info(config: HarnessConfig, trace_id: str) -> dict[str, Any]:
     return {"trace_id": trace_id, "trace_path": None, "events": []}
 
 
+def _tree_snapshot(
+    client: HarnessClient,
+    request_id: Any,
+) -> dict[str, Any]:
+    """실제 JARVIS state → 구조화된 트리 스냅샷 (read-only).
+
+    같은 원천(MemoryContextReader.list_projects + TaskStore.list_tasks)을
+    쓰므로 list_current_tasks / create_task와 일관된다.
+    """
+    memory_dir = client.config.memory_dir
+    if memory_dir is None or not Path(memory_dir).is_dir():
+        return {
+            "type": "response",
+            "id": request_id,
+            "status": "error",
+            "error": "memory_dir 미설정 — JARVIS memory 경로가 없습니다",
+        }
+
+    task_file = client.config.task_file or (Path(memory_dir) / "tasks.md")
+    reader = MemoryContextReader(memory_dir)
+    store = TaskStore(task_file, memory_dir=memory_dir)
+
+    tree: list[dict[str, Any]] = []
+    for project in reader.list_projects():
+        project_id = project["id"]
+        try:
+            tasks = store.list_tasks(project_id)
+        except Exception:
+            # 한 프로젝트의 파싱 오류가 전체 스냅샷을 막지 않도록 안전하게 빈 목록
+            tasks = []
+        tree.append({
+            "id": project_id,
+            "type": "project",
+            "title": project["title"] or project_id,
+            "status": "active",
+            "children": [
+                {
+                    "id": task["id"],
+                    "type": "task",
+                    "title": task["title"],
+                    "reason": task.get("reason", ""),
+                    "status": "done" if task.get("done") else "open",
+                    "parent_id": project_id,
+                }
+                for task in tasks
+            ],
+        })
+
+    scratch = str(memory_dir).replace("\\", "/").startswith(
+        str(PROJECT_ROOT).replace("\\", "/") + "/data/"
+    )
+    return {
+        "type": "response",
+        "id": request_id,
+        "status": "ok",
+        "tree": tree,
+        "scratch": scratch,
+    }
+
+
 class BridgeSession:
     """bridge 상태: 단일 대화의 마지막 user text를 유지해 confirm 맥락을 복원한다."""
 
@@ -153,6 +215,11 @@ def handle_message(
     try:
         if message_type == "ping":
             return {"type": "response", "id": request_id, "status": "ok"}
+
+        if message_type == "tree_snapshot":
+            # read-only — 실제 JARVIS memory(projects.md + tasks.md)를
+            # 단일 원천으로 구조화된 트리 스냅샷으로 반환한다. 모델 호출 없음.
+            return _tree_snapshot(client, request_id)
 
         if message_type == "shutdown":
             raise SystemExit(0)
