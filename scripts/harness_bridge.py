@@ -39,6 +39,7 @@ from typing import Any, Callable, TextIO
 from harness.client import HarnessClient
 from harness.config import PROJECT_ROOT, HarnessConfig
 from harness.tools.memory_context import MemoryContextReader
+from harness.tools.page_store import PageStore
 from harness.tools.task_store import TaskStore
 
 DEFAULT_PROJECT = "jarvis-app"
@@ -136,6 +137,13 @@ def _trace_info(config: HarnessConfig, trace_id: str) -> dict[str, Any]:
     return {"trace_id": trace_id, "trace_path": None, "events": []}
 
 
+def _is_scratch_dir(path: Any) -> bool:
+    """data/ 아래 격리 scratch인지 판정 (응답의 scratch 플래그 공용)."""
+    return str(path).replace("\\", "/").startswith(
+        str(PROJECT_ROOT).replace("\\", "/") + "/data/"
+    )
+
+
 def _tree_snapshot(
     client: HarnessClient,
     request_id: Any,
@@ -184,15 +192,46 @@ def _tree_snapshot(
             ],
         })
 
-    scratch = str(memory_dir).replace("\\", "/").startswith(
-        str(PROJECT_ROOT).replace("\\", "/") + "/data/"
-    )
     return {
         "type": "response",
         "id": request_id,
         "status": "ok",
         "tree": tree,
-        "scratch": scratch,
+        "scratch": _is_scratch_dir(memory_dir),
+    }
+
+
+def _pages_snapshot(
+    client: HarnessClient,
+    request_id: Any,
+) -> dict[str, Any]:
+    """Knowledge Markdown pages → 재귀 트리 스냅샷 (read-only).
+
+    pages_dir이 설정돼 있지 않으면 scratch 기본 위치
+    <memory_dir>/pages 를 스캔한다. PageStore가 단일 원천이며,
+    이 메시지는 모델 호출 없이 Snapshot만 만든다.
+    """
+    memory_dir = client.config.memory_dir
+    if memory_dir is None or not Path(memory_dir).is_dir():
+        return {
+            "type": "response",
+            "id": request_id,
+            "status": "error",
+            "error": "memory_dir 미설정 — JARVIS memory 경로가 없습니다",
+        }
+
+    pages_dir = client.config.pages_dir or (Path(memory_dir) / "pages")
+    store = PageStore(pages_dir)
+    snapshot = store.snapshot()
+    return {
+        "type": "response",
+        "id": request_id,
+        "status": "ok",
+        "pages": snapshot["pages"],
+        "count": snapshot["count"],
+        "conflicts": snapshot["conflicts"],
+        "pages_dir": str(pages_dir),
+        "scratch": _is_scratch_dir(pages_dir),
     }
 
 
@@ -220,6 +259,10 @@ def handle_message(
             # read-only — 실제 JARVIS memory(projects.md + tasks.md)를
             # 단일 원천으로 구조화된 트리 스냅샷으로 반환한다. 모델 호출 없음.
             return _tree_snapshot(client, request_id)
+
+        if message_type == "pages_snapshot":
+            # read-only — Knowledge Markdown pages의 재귀 트리. 모델 호출 없음.
+            return _pages_snapshot(client, request_id)
 
         if message_type == "shutdown":
             raise SystemExit(0)

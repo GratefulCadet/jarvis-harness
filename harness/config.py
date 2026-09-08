@@ -37,6 +37,7 @@ class HarnessConfig:
     memory_dir: Path | None = None
     # Slice 4: create_task 저장 파일 (기본: <memory_dir>/tasks.md). None이면 memory_dir에서 유도.
     task_file: Path | None = None
+    pages_dir: Path | None = None  # Knowledge Markdown pages 루트 (None = <memory_dir>/pages)
 
     @classmethod
     def load(cls, path: Path | str | None = None) -> "HarnessConfig":
