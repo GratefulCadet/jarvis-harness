@@ -53,8 +53,14 @@ def _build_discovery(
 
 def build_list_projects_tool(
     memory_dir: str | Path | None,
+    file_roots: str | dict[str, str] | None = None,
 ) -> Tool:
-    """PART B-1 — 모든 프로젝트 나열 (id 없이도)."""
+    """PART B-1 — 모든 프로젝트 나열 (id 없이도).
+
+    file_roots를 전달한다 — primary_workspace.available은 현재 디바이스의
+    승인 루트 기준으로 판정되므로(§PART E), 루트 없이 만들면 항상 false가
+    나와 Qwen에 거짓 정보를 준다.
+    """
     schema = list_projects_schema()
     if memory_dir is None:
         return Tool(
@@ -66,7 +72,7 @@ def build_list_projects_tool(
                 "HARNESS_MEMORY_DIR 환경변수로 JARVIS memory 경로를 지정하세요"
             ),
         )
-    discovery = _build_discovery(memory_dir, None, None, None)
+    discovery = _build_discovery(memory_dir, None, None, file_roots)
 
     def handler(arguments: dict[str, Any]) -> dict[str, Any]:
         projects = discovery.list_projects_detailed()
@@ -81,6 +87,7 @@ def build_list_projects_tool(
 def build_search_projects_tool(
     memory_dir: str | Path | None,
     task_file: str | Path | None = None,
+    file_roots: str | dict[str, str] | None = None,
 ) -> Tool:
     """PART B — 이름/내용으로 프로젝트 검색."""
     schema = search_projects_schema()
@@ -94,7 +101,7 @@ def build_search_projects_tool(
                 "HARNESS_MEMORY_DIR 환경변수로 JARVIS memory 경로를 지정하세요"
             ),
         )
-    discovery = _build_discovery(memory_dir, task_file, None, None)
+    discovery = _build_discovery(memory_dir, task_file, None, file_roots)
 
     def handler(arguments: dict[str, Any]) -> dict[str, Any]:
         return discovery.search_projects(arguments["query"])

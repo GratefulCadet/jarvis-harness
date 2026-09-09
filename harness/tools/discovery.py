@@ -7,6 +7,10 @@ from typing import Any
 from harness.tools.file_store import FileStore, parse_roots
 from harness.tools.memory_context import MemoryContextReader
 from harness.tools.page_store import PageStore, split_frontmatter
+from harness.tools.project_workspaces import (
+    ProjectWorkspaces,
+    default_project_workspaces_file,
+)
 from harness.tools.resource_links import ProjectResources, default_links_file
 from harness.tools.task_store import TaskStore
 from harness.tools.workspace import WorkspaceManager, default_registry_file
@@ -80,6 +84,18 @@ class Discovery:
             if self.workspace is not None
             else None
         )
+        # Project Primary Workspace (§4) — project_id → 논리 root_id 관계.
+        # 레지스트리는 <memory_dir>/project_workspaces.json. roots가 없어도
+        # 관계 읽기는 가능해야 한다(다른 디바이스에서 설정한 관계 → available:false).
+        self.project_workspaces = (
+            ProjectWorkspaces(
+                default_project_workspaces_file(self.memory_dir),
+                self.memory_dir,
+                roots=dict(self.files.roots),
+            )
+            if self.memory_dir is not None
+            else None
+        )
 
     # ---------- 원천 로더 ----------
 
@@ -138,6 +154,20 @@ class Discovery:
                     entry["done_count"] = sum(1 for task in tasks if task["done"])
                 except (ValueError, OSError):
                     pass
+            # PART E — primary workspace 메타데이터. 없으면 필드 자체를 만들지
+            # 않는다(fabricate 금지). available은 현재 디바이스 기준 판정.
+            if self.project_workspaces is not None:
+                pw = self.project_workspaces.get_project_primary_workspace(
+                    project["id"]
+                )
+                if pw is not None:
+                    entry["primary_workspace"] = {
+                        "root_id": pw["root_id"],
+                        "display_name": pw["display_name"],
+                        "available": pw["available"],
+                    }
+                    if pw.get("reason"):
+                        entry["primary_workspace"]["reason"] = pw["reason"]
             detailed.append(entry)
         return detailed
 
@@ -185,6 +215,19 @@ class Discovery:
                     matched_on = "task"
                     rank = 5
                     match_detail = best_task["title"]
+
+            # PART E — workspace 표시명/경로를 2차 근거로만 사용(명시적 라벨).
+            # Project identity는 여전히 id다 — 경로가 identity가 되지 않는다(§7).
+            if matched_on is None and self.project_workspaces is not None:
+                pw = self.project_workspaces.get_project_primary_workspace(project_id)
+                if pw is not None:
+                    ws_haystack = _normalize(
+                        f"{pw.get('display_name', '')} {pw.get('device_path', '')}"
+                    )
+                    if _normalize(needle) in ws_haystack:
+                        matched_on = "primary_workspace"
+                        rank = 6
+                        match_detail = pw.get("display_name") or pw.get("device_path", "")
             if matched_on is None:
                 continue
             results.append({

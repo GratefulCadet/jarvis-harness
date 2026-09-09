@@ -48,6 +48,10 @@ from harness.tools.resource_links import (
     default_links_file,
     relation_label,
 )
+from harness.tools.project_workspaces import (
+    ProjectWorkspaceError,
+    ProjectWorkspaces,
+)
 from harness.tools.task_store import TaskStore, TaskValidationError
 from harness.tools.workspace import WorkspaceManager, default_registry_file
 
@@ -200,6 +204,9 @@ def _tree_snapshot(
                 # PROJECTS의 semantic projection — persisted ResourceLink만
                 # 보인다. 검색 유사성으로 자동 링크를 만들지 않는다(PART H·L).
                 *_project_resources_children(client, project_id),
+                # PART F — primary workspace semantic 노드 (관계가 있을 때만).
+                # Workspace는 root_id 참조일 뿐 중복 Project가 아니다.
+                *_project_workspace_children(client, project_id),
             ],
         })
 
@@ -364,6 +371,59 @@ def _resources(client: HarnessClient) -> ProjectResources | None:
         client.config.memory_dir,
         workspace=workspace,
     )
+
+
+def _project_workspaces(client: HarnessClient) -> ProjectWorkspaces | None:
+    """bridge용 Project→Workspace 관계 계층 — <memory_dir>/project_workspaces.json.
+
+    Discovery가 이미 같은 인스턴스를 만든다. memory_dir만 있으면 관계 읽기가
+    가능해야 하므로(다른 디바이스에서 설정한 관계 → available:false) 루트 유무로
+    None을 반환하지 않는다.
+    """
+    if client.config.memory_dir is None:
+        return None
+    discovery = _discovery(client)
+    assert discovery.project_workspaces is not None
+    return discovery.project_workspaces
+
+
+def _project_workspace_children(
+    client: HarnessClient,
+    project_id: str,
+) -> list[dict[str, Any]]:
+    """tree_snapshot용 — Project 아래 semantic Workspace 노드 (PART F).
+
+    WorkspaceRoot를 논리 identity로 참조하는 projection일 뿐 중복 Project가
+    아니다. FILES 물리 뷰는 그대로 별도 섹션이다. 관계가 없으면 노드를
+    만들지 않는다(fabricate 금지).
+    """
+    workspaces = _project_workspaces(client)
+    if workspaces is None:
+        return []
+    try:
+        pw = workspaces.get_project_primary_workspace(project_id)
+    except ProjectWorkspaceError:
+        return []
+    if pw is None:
+        return []
+
+    return [{
+        "id": f"workspace:{project_id}",
+        "type": "workspace_group",
+        "title": "Workspace",
+        "status": "active",
+        "children": [{
+            # project-scoped id — 두 프로젝트가 같은 root를 primary로 공유해도
+            # 트리 노드 id는 유일해야 한다(접힘 상태 키 충돌 방지).
+            "id": f"wsroot:{project_id}:{pw['root_id']}",
+            "type": "project_workspace",
+            "title": pw["display_name"],
+            "status": "available" if pw["available"] else "unavailable",
+            "root_id": pw["root_id"],
+            "available": pw["available"],
+            **({"reason": pw["reason"]} if pw.get("reason") else {}),
+        }],
+    }]
 
 
 def _project_resources_children(
@@ -607,6 +667,125 @@ def _unlink(
     }
 
 
+# ---------- Project Primary Workspace (§4 — PROJECT PRIMARY WORKSPACE V1) ----------
+
+def _set_project_workspace(
+    client: HarnessClient,
+    request_id: Any,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """PART I — 명시적 사용자 행동: Project → primary WorkspaceRoot 설정.
+
+    deterministic canonical metadata write — ProjectWorkspaces가 단일 writer.
+    모델 호출 없음. root_id는 논리 identity만 — 절대 경로는 하드 거부.
+    """
+    project_id = payload.get("project_id")
+    root_id = payload.get("root_id")
+    if not isinstance(project_id, str) or not project_id.strip():
+        return {"type": "response", "id": request_id, "status": "error",
+                "error": "project_id가 필요합니다"}
+    if not isinstance(root_id, str) or not root_id.strip():
+        return {"type": "response", "id": request_id, "status": "error",
+                "error": "root_id(논리 root identity)가 필요합니다"}
+
+    workspaces = _project_workspaces(client)
+    if workspaces is None:
+        return {"type": "response", "id": request_id, "status": "error",
+                "error": "memory_dir 미설정 — workspace 관계를 설정할 수 없습니다"}
+
+    try:
+        result = workspaces.set_project_primary_workspace(
+            project_id.strip(), root_id.strip()
+        )
+    except ProjectWorkspaceError as exc:
+        return {"type": "response", "id": request_id, "status": "error",
+                "error": str(exc)}
+    except Exception as exc:  # 방어적 — 어떤 실패든 JSONL로 반환
+        return {"type": "response", "id": request_id, "status": "error",
+                "error": f"{type(exc).__name__}: {exc}"}
+
+    return {
+        "type": "response",
+        "id": request_id,
+        "status": "ok",
+        "project_id": result["project_id"],
+        "root_id": result["root_id"],
+        "updated": result["updated"],
+        "workspace": result["workspace"],
+        "scratch": _is_scratch_dir(client.config.memory_dir),
+    }
+
+
+def _get_project_workspace(
+    client: HarnessClient,
+    request_id: Any,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """PART D·E — 관계 + 현재 디바이스 가용성 조회. 모델 호출 없음."""
+    project_id = payload.get("project_id")
+    if not isinstance(project_id, str) or not project_id.strip():
+        return {"type": "response", "id": request_id, "status": "error",
+                "error": "project_id가 필요합니다"}
+
+    workspaces = _project_workspaces(client)
+    if workspaces is None:
+        return {"type": "response", "id": request_id, "status": "error",
+                "error": "memory_dir 미설정 — workspace 관계를 조회할 수 없습니다"}
+
+    try:
+        workspace = workspaces.get_project_primary_workspace(project_id.strip())
+    except ProjectWorkspaceError as exc:
+        return {"type": "response", "id": request_id, "status": "error",
+                "error": str(exc)}
+    except Exception as exc:
+        return {"type": "response", "id": request_id, "status": "error",
+                "error": f"{type(exc).__name__}: {exc}"}
+
+    return {
+        "type": "response",
+        "id": request_id,
+        "status": "ok",
+        "project_id": project_id.strip(),
+        "workspace": workspace,  # 관계 없음 = None (fabricate 금지)
+        "scratch": _is_scratch_dir(client.config.memory_dir),
+    }
+
+
+def _clear_project_workspace(
+    client: HarnessClient,
+    request_id: Any,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """PART J-8 — 관계 메타데이터만 제거. 사용자 폴더는 건드리지 않는다."""
+    project_id = payload.get("project_id")
+    if not isinstance(project_id, str) or not project_id.strip():
+        return {"type": "response", "id": request_id, "status": "error",
+                "error": "project_id가 필요합니다"}
+
+    workspaces = _project_workspaces(client)
+    if workspaces is None:
+        return {"type": "response", "id": request_id, "status": "error",
+                "error": "memory_dir 미설정 — workspace 관계를 해제할 수 없습니다"}
+
+    try:
+        result = workspaces.clear_project_primary_workspace(project_id.strip())
+    except ProjectWorkspaceError as exc:
+        return {"type": "response", "id": request_id, "status": "error",
+                "error": str(exc)}
+    except Exception as exc:
+        return {"type": "response", "id": request_id, "status": "error",
+                "error": f"{type(exc).__name__}: {exc}"}
+
+    return {
+        "type": "response",
+        "id": request_id,
+        "status": "ok",
+        "project_id": result["project_id"],
+        "removed": result["removed"],
+        "scratch": _is_scratch_dir(client.config.memory_dir),
+    }
+
+
 def _files_snapshot(
     client: HarnessClient,
     request_id: Any,
@@ -755,8 +934,16 @@ def handle_message(
             return _list_project_resources(client, request_id, msg)
 
         if message_type == "unlink_project_file":
-            # deterministic metadata cleanup — JARVIS 메타데이터만 제거(K-13).
             return _unlink(client, request_id, msg)
+
+        if message_type == "set_project_workspace":
+            return _set_project_workspace(client, request_id, msg)
+
+        if message_type == "get_project_workspace":
+            return _get_project_workspace(client, request_id, msg)
+
+        if message_type == "clear_project_workspace":
+            return _clear_project_workspace(client, request_id, msg)
 
         if message_type == "shutdown":
             raise SystemExit(0)

@@ -62,8 +62,10 @@ def build_default_registry(
     registry = ToolRegistry()
     registry.register(build_get_project_context_tool(memory_dir))
     registry.register(build_list_current_tasks_tool(memory_dir, task_file))
-    registry.register(build_list_projects_tool(memory_dir))
-    registry.register(build_search_projects_tool(memory_dir, task_file))
+    registry.register(build_list_projects_tool(memory_dir, file_roots=file_roots))
+    registry.register(
+        build_search_projects_tool(memory_dir, task_file, file_roots=file_roots)
+    )
     registry.register(
         build_search_context_tool(memory_dir, task_file, pages_dir, file_roots)
     )
