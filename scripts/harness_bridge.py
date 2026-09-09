@@ -40,7 +40,7 @@ from harness.client import HarnessClient
 from harness.config import PROJECT_ROOT, HarnessConfig
 from harness.tools.memory_context import MemoryContextReader
 from harness.tools.page_store import PageStore
-from harness.tools.task_store import TaskStore
+from harness.tools.task_store import TaskStore, TaskValidationError
 
 DEFAULT_PROJECT = "jarvis-app"
 DEFAULT_SCRATCH = PROJECT_ROOT / "data" / "electron_scratch"
@@ -201,6 +201,59 @@ def _tree_snapshot(
     }
 
 
+def _create_task(
+    client: HarnessClient,
+    request_id: Any,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """SYSTEM MAP Add Task → canonical TaskStore write (deterministic, no LLM).
+
+    Direct explicit user action (Tree UI click) — no Permission Gate round-trip.
+    TaskStore is the single writer; this handler is a thin deterministic bridge
+    without duplicating TaskStore logic. model 호출 없음.
+    """
+    memory_dir = client.config.memory_dir
+    if memory_dir is None or not Path(memory_dir).is_dir():
+        return {
+            "type": "response",
+            "id": request_id,
+            "status": "error",
+            "error": "memory_dir 미설정 — JARVIS memory 경로가 없습니다",
+        }
+
+    project_id = payload.get("project_id")
+    title = payload.get("title")
+    # reason은 선택 — 없으면 TaskStore가 빈 문자열로 정규화한다
+    reason = payload.get("reason")
+
+    task_file = client.config.task_file or (Path(memory_dir) / "tasks.md")
+    store = TaskStore(task_file, memory_dir=memory_dir)
+    try:
+        result = store.create(project_id, title, reason)
+    except (TaskValidationError, ValueError) as exc:
+        return {
+            "type": "response",
+            "id": request_id,
+            "status": "error",
+            "error": str(exc),
+        }
+    except Exception as exc:  # 방어적 — 어떤 실패든 JSONL로 반환
+        return {
+            "type": "response",
+            "id": request_id,
+            "status": "error",
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
+    return {
+        "type": "response",
+        "id": request_id,
+        "status": "ok",
+        "task": result,
+        "scratch": _is_scratch_dir(memory_dir),
+    }
+
+
 def _pages_snapshot(
     client: HarnessClient,
     request_id: Any,
@@ -259,6 +312,10 @@ def handle_message(
             # read-only — 실제 JARVIS memory(projects.md + tasks.md)를
             # 단일 원천으로 구조화된 트리 스냅샷으로 반환한다. 모델 호출 없음.
             return _tree_snapshot(client, request_id)
+
+        if message_type == "create_task":
+            # deterministic canonical write — TaskStore가 단일 writer, 모델 호출 없음.
+            return _create_task(client, request_id, msg)
 
         if message_type == "pages_snapshot":
             # read-only — Knowledge Markdown pages의 재귀 트리. 모델 호출 없음.
