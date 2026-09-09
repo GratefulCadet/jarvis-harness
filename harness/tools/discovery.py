@@ -1,0 +1,316 @@
+from __future__ import annotations
+
+import re
+from pathlib import Path
+from typing import Any
+
+from harness.tools.file_store import FileStore, parse_roots
+from harness.tools.memory_context import MemoryContextReader
+from harness.tools.page_store import PageStore, split_frontmatter
+from harness.tools.task_store import TaskStore
+
+"""Context Discovery — canonical read-only discovery layer (PART B/C).
+
+§3 데이터 소유 원칙: 이 모듈은 새 저장소를 만들지 않는다. Project/Task는
+MemoryContextReader·TaskStore, Page는 PageStore, File은 FileStore의 결과를
+읽어 결정적으로 매칭하는 read adapter일 뿐이다. 결과는 항상 canonical
+identity(id·path)와 matched content를 분리해 반환한다(PART G).
+
+랭킹(PART B-2, 벡터/DB 없음):
+  1. exact project id
+  2. exact normalized title
+  3. case-insensitive normalized title
+  4. title substring
+  5. id substring (부분 기억 id)
+  6. task 제목/이유 substring → matched_on: task (내 기억으로 프로젝트 재발견)
+"""
+
+_MAX_SEARCH_RESULTS = 25
+_DEFAULT_SEARCH_LIMIT = 10
+
+
+def _normalize(text: str) -> str:
+    """소문자화 + 공백 정규화 (한글 등 비ASCII는 그대로 둔다)."""
+    return re.sub(r"\s+", " ", (text or "").strip()).lower()
+
+
+def _normalize_loose(text: str) -> str:
+    """순위용 완화 정규화 — 공백/구두점/밑줄/하이픈 제거 후 소문자."""
+    return re.sub(r"[\s\-_.:,()\[\]]+", "", _normalize(text))
+
+
+class Discovery:
+    """Project/Task/Page/File 도메인의 결정적 read-only 검색 계층."""
+
+    def __init__(
+        self,
+        memory_dir: str | Path | None,
+        task_file: str | Path | None = None,
+        pages_dir: str | Path | None = None,
+        file_roots: str | dict[str, str] | None = None,
+    ) -> None:
+        self.memory_dir = Path(memory_dir) if memory_dir else None
+        self.task_file = Path(task_file) if task_file else None
+        self.pages_dir = (
+            Path(pages_dir)
+            if pages_dir
+            else (self.memory_dir / "pages" if self.memory_dir else None)
+        )
+        if isinstance(file_roots, dict) and file_roots:
+            self.files = FileStore(file_roots)
+        else:
+            self.files = FileStore(parse_roots(file_roots))
+
+    # ---------- 원천 로더 ----------
+
+    def _reader(self) -> MemoryContextReader:
+        if self.memory_dir is None:
+            raise ValueError("memory_dir 미설정 — discovery 원천이 없습니다")
+        return MemoryContextReader(self.memory_dir)
+
+    def _tasks(self) -> list[dict[str, Any]]:
+        """모든 프로젝트의 task를 평탄화 (project_id 포함). read-only."""
+        if self.memory_dir is None:
+            return []
+        task_file = self.task_file_path()
+        try:
+            store = TaskStore(task_file, memory_dir=self.memory_dir)
+        except (ValueError, OSError):
+            return []
+        tasks: list[dict[str, Any]] = []
+        for project in self._reader().list_projects():
+            try:
+                for task in store.list_tasks(project["id"]):
+                    tasks.append({**task, "project_id": project["id"]})
+            except (ValueError, OSError):
+                continue
+        return tasks
+
+    def task_file_path(self) -> Path:
+        if self.memory_dir is None:
+            raise ValueError("memory_dir 미설정")
+        return self.task_file or (self.memory_dir / "tasks.md")
+
+    def list_projects_detailed(self) -> list[dict[str, Any]]:
+        """PART B-1 — 모든 프로젝트 + canonical task 수.
+
+        반환: [{id, title, task_count, done_count}] — 실제 존재하는 메타데이터만
+        담는다. 요약/상태 같은 필드는 projects.md에 없으므로 만들지 않는다.
+        """
+        projects = self._reader().list_projects()
+        task_file = self.task_file_path()
+        try:
+            store = TaskStore(task_file, memory_dir=self.memory_dir)
+        except (ValueError, OSError):
+            store = None
+        detailed: list[dict[str, Any]] = []
+        for project in projects:
+            entry: dict[str, Any] = {
+                "id": project["id"],
+                "title": project["title"],
+                "task_count": 0,
+                "done_count": 0,
+            }
+            if store is not None:
+                try:
+                    tasks = store.list_tasks(project["id"])
+                    entry["task_count"] = len(tasks)
+                    entry["done_count"] = sum(1 for task in tasks if task["done"])
+                except (ValueError, OSError):
+                    pass
+            detailed.append(entry)
+        return detailed
+
+    # ---------- 프로젝트 검색 ----------
+
+    def search_projects(self, query: str, limit: int = 10) -> dict[str, Any]:
+        """PART B — 이름/id/task 내용으로 프로젝트 검색 (결정적 랭킹)."""
+        needle = (query or "").strip()
+        if not needle:
+            raise ValueError("검색어가 비어 있습니다")
+        projects = self._reader().list_projects()
+        tasks = self._tasks()
+        loose = _normalize_loose(needle)
+        results: list[dict[str, Any]] = []
+
+        for project in projects:
+            project_id = project["id"]
+            title = project["title"] or ""
+            matched_on = None
+            match_detail = ""
+            rank = 99
+            if project_id == needle:
+                matched_on, rank, match_detail = "id", 0, project_id
+            elif _normalize_loose(title) == loose and title:
+                matched_on, rank, match_detail = "title", 1, title
+            elif _normalize(title) == _normalize(needle) and title:
+                matched_on, rank, match_detail = "title", 2, title
+            elif _normalize(needle) in _normalize(title):
+                matched_on, rank, match_detail = "title", 3, title
+            elif _normalize(needle) in _normalize(project_id):
+                matched_on, rank, match_detail = "id", 4, project_id
+            else:
+                # task 내용으로 프로젝트 재발견 (PART B-3)
+                best_task = None
+                for task in tasks:
+                    if task["project_id"] != project_id:
+                        continue
+                    haystack = _normalize(
+                        f"{task.get('title', '')} {task.get('reason', '')}"
+                    )
+                    if _normalize(needle) in haystack:
+                        if best_task is None:
+                            best_task = task
+                if best_task is not None:
+                    matched_on = "task"
+                    rank = 5
+                    match_detail = best_task["title"]
+            if matched_on is None:
+                continue
+            results.append({
+                "id": project_id,
+                "type": "project",
+                "title": title or project_id,
+                "matched_on": matched_on,
+                "matched_text": match_detail,
+                "rank": rank,
+            })
+
+        results.sort(key=lambda item: (item["rank"], item["id"]))
+        max_results = max(1, min(int(limit or _DEFAULT_SEARCH_LIMIT), _MAX_SEARCH_RESULTS))
+        return {
+            "query": needle,
+            "count": len(results[:max_results]),
+            "total_matches": len(results),
+            "results": results[:max_results],
+        }
+
+    # ---------- 통합 검색 ----------
+
+    def search_context(self, query: str, limit: int = 10) -> dict[str, Any]:
+        """PART C — Project/Task/Page/File 통합 결정적 검색.
+
+        각 결과는 자기 도메인의 canonical identity + matched_on을 유지한다.
+        Page·File은 Project와의 관계가 canonical metadata에 없으므로
+        소속을 추론하지 않는다 — 관계가 있을 때만 project_id를 실린다.
+        """
+        needle = (query or "").strip()
+        if not needle:
+            raise ValueError("검색어가 비어 있습니다")
+        norm = _normalize(needle)
+        max_results = max(1, min(int(limit or _DEFAULT_SEARCH_LIMIT), _MAX_SEARCH_RESULTS))
+
+        projects = self._reader().list_projects()
+        project_titles = {project["id"]: project["title"] for project in projects}
+        tasks = self._tasks()
+        results: list[dict[str, Any]] = []
+
+        # Tasks — id/title/reason/소속 프로젝트
+        for task in tasks:
+            haystack = _normalize(
+                f"{task.get('id', '')} {task.get('title', '')} "
+                f"{task.get('reason', '')}"
+            )
+            if norm not in haystack:
+                continue
+            matched_on = "title" if norm in _normalize(task.get("title", "")) else "reason"
+            if norm in _normalize(task.get("id", "")):
+                matched_on = "id"
+            results.append({
+                "type": "task",
+                "id": task["id"],
+                "title": task.get("title", ""),
+                "project_id": task["project_id"],
+                "project_title": project_titles.get(task["project_id"], ""),
+                "matched_on": matched_on,
+            })
+
+        # Projects — id/title (task 매치는 task 항목이 이미 담당)
+        for project in projects:
+            haystack = _normalize(f"{project['id']} {project.get('title', '')}")
+            if norm in haystack:
+                matched_on = "id" if norm in _normalize(project["id"]) else "title"
+                results.append({
+                    "type": "project",
+                    "id": project["id"],
+                    "title": project.get("title") or project["id"],
+                    "matched_on": matched_on,
+                })
+
+        # Pages — id/title/path/body (project 소속 추론 금지 — standalone 허용)
+        page_results: list[dict[str, Any]] = []
+        if self.pages_dir is not None and self.pages_dir.is_dir():
+            page_root = self.pages_dir
+            store = PageStore(page_root)
+            for path in sorted(page_root.rglob("*.md")):
+                relative = path.relative_to(page_root)
+                rel_posix = relative.as_posix()[: -len(".md")]
+                try:
+                    text = path.read_text(encoding="utf-8")
+                except OSError:
+                    continue
+                haystack = _normalize(f"{rel_posix} {text}")
+                if norm not in haystack:
+                    continue
+                # PageStore와 동일한 규칙으로 제목 결정 (frontmatter > 첫 H1 > stem)
+                meta, body = split_frontmatter(text)
+                stem = rel_posix.rsplit("/", 1)[-1]
+                title = meta.get("title") or stem
+                for line in body.splitlines():
+                    stripped = line.strip()
+                    if stripped.startswith("# "):
+                        if not meta.get("title"):
+                            title = stripped[2:].strip()
+                        break
+                    if stripped:
+                        break
+                if norm in _normalize(stem):
+                    matched_on = "title"
+                elif title and norm in _normalize(title):
+                    matched_on = "title"
+                else:
+                    matched_on = "content"
+                page_results.append({
+                    "type": "page",
+                    "id": None,  # PageStore 규칙 재계산 대신 snapshot에서 보강
+                    "path": rel_posix,
+                    "title": title,
+                    "matched_on": matched_on,
+                })
+        if page_results:
+            # snapshot의 결정적 id(derived 해시)를 path로 보강
+            snapshot = store.snapshot()
+            ids_by_path = {}
+
+            def _collect(nodes: list[dict[str, Any]]) -> None:
+                for node in nodes:
+                    ids_by_path[node["path"]] = node["id"]
+                    _collect(node.get("children", []))
+
+            _collect(snapshot["pages"])
+            for item in page_results:
+                item["id"] = ids_by_path.get(item["path"]) or item["path"]
+            results.extend(page_results)
+
+        # Files — 이름/경로/본문 (승인 루트가 있을 때만; File != Page)
+        if self.files.roots:
+            try:
+                file_matches = self.files.search(needle, limit=max_results)
+                for item in file_matches["results"]:
+                    results.append({
+                        "type": "file",
+                        "root": item["root"],
+                        "path": item["path"],
+                        "name": item["name"],
+                        "matched_on": item["matched_on"],
+                        "snippet": item.get("snippet"),
+                    })
+            except ValueError:
+                pass  # 루트 없음/검색어 문제 — file 도메인만 건너뜀
+
+        return {
+            "query": needle,
+            "count": len(results[:max_results]),
+            "total_matches": len(results),
+            "results": results[:max_results],
+        }

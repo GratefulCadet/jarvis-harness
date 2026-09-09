@@ -58,6 +58,8 @@ class HarnessClient:
         self._tools = tools if tools is not None else build_default_registry(
             memory_dir=self._config.memory_dir,
             task_file=self._config.task_file,
+            pages_dir=self._config.pages_dir,
+            file_roots=self._config.file_roots,
         )
 
     @property

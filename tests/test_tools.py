@@ -215,7 +215,7 @@ class RegistryGateTests(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertEqual(len(called), 1)
 
-    def test_default_registry_exposes_four_schemas(self) -> None:
+    def test_default_registry_exposes_expected_schemas(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             registry = registry_with_memory(Path(temp))
             names = sorted(schema.name for schema in registry.schemas())
@@ -225,7 +225,13 @@ class RegistryGateTests(unittest.TestCase):
                     "create_task",
                     "get_project_context",
                     "list_current_tasks",
+                    "list_files",
+                    "list_projects",
                     "propose_next_action",
+                    "read_file",
+                    "search_context",
+                    "search_files",
+                    "search_projects",
                 ],
             )
 
@@ -477,7 +483,13 @@ class ClientToolWiringTests(unittest.TestCase):
                     "create_task",
                     "get_project_context",
                     "list_current_tasks",
+                    "list_files",
+                    "list_projects",
                     "propose_next_action",
+                    "read_file",
+                    "search_context",
+                    "search_files",
+                    "search_projects",
                 },
             )
 

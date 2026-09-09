@@ -38,6 +38,8 @@ from typing import Any, Callable, TextIO
 
 from harness.client import HarnessClient
 from harness.config import PROJECT_ROOT, HarnessConfig
+from harness.tools.discovery import Discovery
+from harness.tools.file_store import DEFAULT_MAX_DEPTH
 from harness.tools.memory_context import MemoryContextReader
 from harness.tools.page_store import PageStore
 from harness.tools.task_store import TaskStore, TaskValidationError
@@ -316,6 +318,137 @@ def _create_task(
     }
 
 
+def _discovery(client: HarnessClient) -> Discovery:
+    """bridge용 Discovery adapter — harness_bridge 설정(격리 scratch 포함)을 쓴다."""
+    return Discovery(
+        client.config.memory_dir,
+        task_file=client.config.task_file,
+        pages_dir=client.config.pages_dir,
+        file_roots=client.config.file_roots,
+    )
+
+
+def _discover_projects(
+    client: HarnessClient,
+    request_id: Any,
+) -> dict[str, Any]:
+    """PART B-1 — 모든 프로젝트 + canonical task 수. read-only, 모델 호출 없음."""
+    memory_dir = client.config.memory_dir
+    if memory_dir is None or not Path(memory_dir).is_dir():
+        return {
+            "type": "response",
+            "id": request_id,
+            "status": "error",
+            "error": "memory_dir 미설정 — JARVIS memory 경로가 없습니다",
+        }
+    try:
+        projects = _discovery(client).list_projects_detailed()
+    except Exception as exc:
+        return {
+            "type": "response",
+            "id": request_id,
+            "status": "error",
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+    return {
+        "type": "response",
+        "id": request_id,
+        "status": "ok",
+        "projects": projects,
+        "scratch": _is_scratch_dir(memory_dir),
+    }
+
+
+def _search_context(
+    client: HarnessClient,
+    request_id: Any,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """PART C — Project/Task/Page/File 통합 검색. read-only, 모델 호출 없음."""
+    memory_dir = client.config.memory_dir
+    if memory_dir is None or not Path(memory_dir).is_dir():
+        return {
+            "type": "response",
+            "id": request_id,
+            "status": "error",
+            "error": "memory_dir 미설정 — JARVIS memory 경로가 없습니다",
+        }
+    query = payload.get("query")
+    if not isinstance(query, str) or not query.strip():
+        return {
+            "type": "response",
+            "id": request_id,
+            "status": "error",
+            "error": "query가 비어 있습니다",
+        }
+    limit = payload.get("limit") or 10
+    try:
+        result = _discovery(client).search_context(query, limit=limit)
+    except Exception as exc:
+        return {
+            "type": "response",
+            "id": request_id,
+            "status": "error",
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+    return {
+        "type": "response",
+        "id": request_id,
+        "status": "ok",
+        **result,
+        "scratch": _is_scratch_dir(memory_dir),
+    }
+
+
+def _files_snapshot(
+    client: HarnessClient,
+    request_id: Any,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """PART D/E — 승인된 파일 루트의 경계 있는 트리 스냅샷. read-only, 모델 호출 없음.
+
+    SYSTEM MAP FILES 섹션용. 루트가 없으면 status=ok + roots:[] — renderer가
+    '루트 없음' 상태를 표시한다(오류 아님).
+    """
+    discovery = _discovery(client)
+    root = payload.get("root")
+    relative = payload.get("path")
+    depth = payload.get("depth") or DEFAULT_MAX_DEPTH
+    try:
+        if root and str(root).strip():
+            root_name, _ = discovery.files.resolve_root(root)
+            roots = {root_name: discovery.files.roots[root_name]}
+        else:
+            roots = dict(discovery.files.roots)
+    except Exception as exc:
+        return {
+            "type": "response",
+            "id": request_id,
+            "status": "error",
+            "error": str(exc),
+        }
+    sections: list[dict[str, Any]] = []
+    for name in sorted(roots):
+        try:
+            tree = discovery.files.list_tree(
+                root=name,
+                relative=relative if name == (root or name) else None,
+                max_depth=depth,
+            )
+        except Exception as exc:
+            tree = {"root": name, "path": relative or "", "entries": [],
+                    "stats": {"dirs": 0, "files": 0, "blocked": 0, "truncated": False},
+                    "error": str(exc)}
+        sections.append(tree)
+    return {
+        "type": "response",
+        "id": request_id,
+        "status": "ok",
+        "roots": sorted(roots),
+        "sections": sections,
+    }
+
+
 def _pages_snapshot(
     client: HarnessClient,
     request_id: Any,
@@ -386,6 +519,18 @@ def handle_message(
         if message_type == "pages_snapshot":
             # read-only — Knowledge Markdown pages의 재귀 트리. 모델 호출 없음.
             return _pages_snapshot(client, request_id)
+
+        if message_type == "discover_projects":
+            # read-only — 전체 프로젝트 나열 (Context Discovery). 모델 호출 없음.
+            return _discover_projects(client, request_id)
+
+        if message_type == "search_context":
+            # read-only — Project/Task/Page/File 통합 검색. 모델 호출 없음.
+            return _search_context(client, request_id, msg)
+
+        if message_type == "files_snapshot":
+            # read-only — 승인된 루트의 파일 트리 (SYSTEM MAP FILES). 모델 호출 없음.
+            return _files_snapshot(client, request_id, msg)
 
         if message_type == "shutdown":
             raise SystemExit(0)

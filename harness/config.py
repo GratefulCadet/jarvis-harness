@@ -38,6 +38,9 @@ class HarnessConfig:
     # Slice 4: create_task 저장 파일 (기본: <memory_dir>/tasks.md). None이면 memory_dir에서 유도.
     task_file: Path | None = None
     pages_dir: Path | None = None  # Knowledge Markdown pages 루트 (None = <memory_dir>/pages)
+    # Context Discovery (§7): 승인된 파일 루트 — dict(name→path) 또는 'name=path,...'.
+    # 기본 없음. JARVIS_FILE_ROOTS 환경변수가 우선한다.
+    file_roots: dict[str, str] | str | None = None
 
     @classmethod
     def load(cls, path: Path | str | None = None) -> "HarnessConfig":
@@ -69,6 +72,16 @@ class HarnessConfig:
             or tools.get("task_file")
             or None
         )
+        flat["pages_dir"] = (
+            os.environ.get("HARNESS_PAGES_DIR")
+            or tools.get("pages_dir")
+            or None
+        )
+        flat["file_roots"] = (
+            os.environ.get("JARVIS_FILE_ROOTS")
+            or tools.get("file_roots")
+            or None
+        )
 
         known = {dataclass_field.name for dataclass_field in dataclasses.fields(cls)}
         values = {key: value for key, value in flat.items() if key in known}
@@ -83,4 +96,7 @@ class HarnessConfig:
         if config.task_file:
             task_file = Path(config.task_file)
             config.task_file = task_file if task_file.is_absolute() else PROJECT_ROOT / task_file
+        if config.pages_dir:
+            pages_dir = Path(config.pages_dir)
+            config.pages_dir = pages_dir if pages_dir.is_absolute() else PROJECT_ROOT / pages_dir
         return config
