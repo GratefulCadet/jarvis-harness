@@ -43,6 +43,7 @@ from harness.tools.file_store import DEFAULT_MAX_DEPTH
 from harness.tools.memory_context import MemoryContextReader
 from harness.tools.page_store import PageStore
 from harness.tools.task_store import TaskStore, TaskValidationError
+from harness.tools.workspace import WorkspaceManager, default_registry_file
 
 DEFAULT_PROJECT = "jarvis-app"
 DEFAULT_SCRATCH = PROJECT_ROOT / "data" / "electron_scratch"
@@ -328,6 +329,18 @@ def _discovery(client: HarnessClient) -> Discovery:
     )
 
 
+def _workspace(client: HarnessClient) -> WorkspaceManager | None:
+    """bridge용 identity 계층 — 레지스트리는 <memory_dir>/file_refs.json (PART D)."""
+    if client.config.memory_dir is None:
+        return None
+    discovery = _discovery(client)
+    if not discovery.files.roots:
+        return None
+    return WorkspaceManager(
+        discovery.files, default_registry_file(Path(client.config.memory_dir))
+    )
+
+
 def _discover_projects(
     client: HarnessClient,
     request_id: Any,
@@ -427,6 +440,7 @@ def _files_snapshot(
             "status": "error",
             "error": str(exc),
         }
+    workspace = _workspace(client)
     sections: list[dict[str, Any]] = []
     for name in sorted(roots):
         try:
@@ -435,6 +449,12 @@ def _files_snapshot(
                 relative=relative if name == (root or name) else None,
                 max_depth=depth,
             )
+            if workspace is not None:
+                # identity 부착 전 최신 스캔 — rename/move가 FILES에 반영된다(PART H)
+                workspace.scan_root(name)
+                for entry in tree.get("entries", []):
+                    if entry.get("type") == "file":
+                        workspace.enrich_entry(entry, name)
         except Exception as exc:
             tree = {"root": name, "path": relative or "", "entries": [],
                     "stats": {"dirs": 0, "files": 0, "blocked": 0, "truncated": False},

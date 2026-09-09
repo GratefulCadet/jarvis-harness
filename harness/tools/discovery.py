@@ -8,6 +8,7 @@ from harness.tools.file_store import FileStore, parse_roots
 from harness.tools.memory_context import MemoryContextReader
 from harness.tools.page_store import PageStore, split_frontmatter
 from harness.tools.task_store import TaskStore
+from harness.tools.workspace import WorkspaceManager, default_registry_file
 
 """Context Discovery — canonical read-only discovery layer (PART B/C).
 
@@ -60,6 +61,13 @@ class Discovery:
             self.files = FileStore(file_roots)
         else:
             self.files = FileStore(parse_roots(file_roots))
+        # Workspace identity (§7·§11) — FileStore 위의 FileRef 계층. 레지스트리는
+        # 파생 상태(<memory_dir>/file_refs.json); 스캔으로 재구성 가능.
+        self.workspace = (
+            WorkspaceManager(self.files, default_registry_file(self.memory_dir))
+            if self.files.roots and self.memory_dir
+            else None
+        )
 
     # ---------- 원천 로더 ----------
 
@@ -292,19 +300,26 @@ class Discovery:
                 item["id"] = ids_by_path.get(item["path"]) or item["path"]
             results.extend(page_results)
 
-        # Files — 이름/경로/본문 (승인 루트가 있을 때만; File != Page)
+        # Files — 이름/경로/본문 (승인 루트가 있을 때만; File != Page).
+        # 결과에 stable FileRef identity(id) + locator(root_id·path)를 분리해 실는다.
         if self.files.roots:
             try:
+                if self.workspace is not None:
+                    self.workspace.ensure_scanned()
                 file_matches = self.files.search(needle, limit=max_results)
                 for item in file_matches["results"]:
-                    results.append({
+                    entry = {
                         "type": "file",
                         "root": item["root"],
+                        "root_id": item["root"],
                         "path": item["path"],
                         "name": item["name"],
                         "matched_on": item["matched_on"],
                         "snippet": item.get("snippet"),
-                    })
+                    }
+                    if self.workspace is not None:
+                        self.workspace.enrich_entry(entry, item["root"])
+                    results.append(entry)
             except ValueError:
                 pass  # 루트 없음/검색어 문제 — file 도메인만 건너뜀
 

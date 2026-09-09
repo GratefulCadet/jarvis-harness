@@ -12,6 +12,7 @@ from harness.tools.file_store import (
     parse_roots,
 )
 from harness.tools.registry import Tool
+from harness.tools.workspace import WorkspaceManager, default_registry_file
 from harness.tools.schemas import (
     list_files as list_files_schema,
     list_projects as list_projects_schema,
@@ -27,6 +28,16 @@ from harness.tools.schemas import (
 Discovery는 기존 canonical 원천(MemoryContextReader·TaskStore·PageStore·
 FileStore)을 읽는 adapter일 뿐 새 저장소를 만들지 않는다(§3).
 """
+
+
+def _build_workspace(
+    files: FileStore,
+    memory_dir: str | Path | None,
+) -> WorkspaceManager | None:
+    """FileStore 위의 identity 계층 — 레지스트리는 <memory_dir>/file_refs.json."""
+    if not files.roots or memory_dir is None:
+        return None
+    return WorkspaceManager(files, default_registry_file(Path(memory_dir)))
 
 
 def _build_discovery(
@@ -121,8 +132,13 @@ def build_search_context_tool(
 
 def build_file_tools(
     file_roots: str | dict[str, str] | None,
+    memory_dir: str | Path | None = None,
 ) -> list[Tool]:
-    """PART D — read-only 파일 tool 3개 (list/read/search)."""
+    """PART D — read-only 파일 tool 3개 (list/read/search).
+
+    결과에 stable FileRef identity(id)를 덧붙인다(§11·PART G) — locator와
+    identity 분리. 레지스트리가 오래됐으면 읽기 전에 재스캔한다.
+    """
     tools: list[Tool] = []
 
     files = None
@@ -130,6 +146,7 @@ def build_file_tools(
         files = FileStore(file_roots)
     else:
         files = FileStore(parse_roots(file_roots))
+    workspace = _build_workspace(files, memory_dir)
 
     # list_files
     schema = list_files_schema()
@@ -146,11 +163,17 @@ def build_file_tools(
         ))
     else:
         def list_handler(arguments: dict[str, Any]) -> dict[str, Any]:
-            return files.list_tree(
+            result = files.list_tree(
                 root=arguments.get("root"),
                 relative=arguments.get("path"),
                 max_depth=arguments.get("depth") or DEFAULT_MAX_DEPTH,
             )
+            if workspace is not None:
+                workspace.ensure_scanned()
+                for entry in result.get("entries", []):
+                    if entry.get("type") == "file":
+                        workspace.enrich_entry(entry, result["root"])
+            return result
         tools.append(Tool(schema=schema, kind="read", handler=list_handler))
 
     # read_file
@@ -167,11 +190,20 @@ def build_file_tools(
         ))
     else:
         def read_handler(arguments: dict[str, Any]) -> dict[str, Any]:
-            return files.read_text(
+            result = files.read_text(
                 arguments["path"],
                 root=arguments.get("root"),
                 max_chars=arguments.get("max_chars") or DEFAULT_READ_CHARS,
             )
+            if workspace is not None:
+                workspace.ensure_scanned()
+                identity = workspace.file_identity(
+                    result["root"], result["path"]
+                )
+                result["root_id"] = identity["root_id"]
+                if "id" in identity:
+                    result["id"] = identity["id"]
+            return result
         tools.append(Tool(schema=schema, kind="read", handler=read_handler))
 
     # search_files
@@ -188,11 +220,16 @@ def build_file_tools(
         ))
     else:
         def search_handler(arguments: dict[str, Any]) -> dict[str, Any]:
-            return files.search(
+            result = files.search(
                 arguments["query"],
                 root=arguments.get("root"),
                 limit=arguments.get("limit") or DEFAULT_MAX_RESULTS,
             )
+            if workspace is not None:
+                workspace.ensure_scanned()
+                for entry in result.get("results", []):
+                    workspace.enrich_entry(entry, entry["root"])
+            return result
         tools.append(Tool(schema=schema, kind="read", handler=search_handler))
 
     return tools

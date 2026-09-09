@@ -67,7 +67,7 @@ def build_default_registry(
     registry.register(
         build_search_context_tool(memory_dir, task_file, pages_dir, file_roots)
     )
-    for tool in build_file_tools(file_roots):
+    for tool in build_file_tools(file_roots, memory_dir=memory_dir):
         registry.register(tool)
     registry.register(
         Tool(
