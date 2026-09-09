@@ -163,6 +163,86 @@ class TaskStore:
             if entry["project_id"] == project
         ]
 
+    def set_done(
+        self,
+        project_id: str,
+        task_id: str,
+        done: bool,
+    ) -> dict[str, Any]:
+        """task 완료/미완료 상태 변경 (canonical writer).
+
+        `- [ ]` ↔ `- [x]` 를 뒤집는다. 같은 상태를 다시 요청하면
+        쓰지 않고 그대로 반환한다(멱등). TaskStore가 단일 parser/writer이며
+        이 메서드는 `_parse` 결과를 신뢰하고 같은 파일 규칙으로 다시 쓴다.
+        """
+        project = self._check_project_id(project_id)
+        if not isinstance(task_id, str) or not task_id.strip():
+            raise TaskValidationError("task_id는 비어 있을 수 없습니다")
+        tid = task_id.strip()
+        if not isinstance(done, bool):
+            raise TaskValidationError("done은 boolean이어야 합니다")
+        if not self.task_file.exists():
+            raise TaskValidationError("tasks.md가 없습니다")
+        text = self.task_file.read_text(encoding="utf-8")
+        entries = self._parse(text)
+        target = next(
+            (e for e in entries if e["project_id"] == project and e["id"] == tid),
+            None,
+        )
+        if target is None:
+            raise TaskValidationError(
+                f"알 수 없는 task: {tid!r} (project: {project!r})"
+            )
+        if target["done"] == done:
+            return {
+                "id": tid,
+                "project_id": project,
+                "title": target["title"],
+                "reason": target["reason"],
+                "done": done,
+                "updated": False,
+            }
+        # 라인 단위로 뒤집기 — 원본 줄의 leading 공백을 보존한다
+        lines = text.split("\n")
+        current: str | None = None
+        updated = False
+        for idx, raw in enumerate(lines):
+            stripped = raw.strip()
+            if stripped.startswith("## "):
+                current = stripped[3:].strip()
+                continue
+            if current != project:
+                continue
+            m = _ENTRY_RE.match(stripped)
+            if not m:
+                continue
+            rest = m.group(2).strip()
+            cand_id, sep, _ = rest.partition(": ")
+            if not sep:
+                continue
+            if cand_id.strip() != tid:
+                continue
+            leading = raw[: len(raw) - len(raw.lstrip(" \t"))] if raw.strip() else ""
+            lines[idx] = f"{leading}- [{'x' if done else ' '}] {rest}"
+            updated = True
+            break
+        if not updated:
+            raise TaskValidationError(
+                f"task 라인을 찾을 수 없습니다: {tid!r}"
+            )
+        new_text = "\n".join(lines)
+        if not new_text.endswith("\n"):
+            new_text += "\n"
+        self._atomic_write(new_text)
+        return {
+            "id": tid,
+            "project_id": project,
+            "title": target["title"],
+            "reason": target["reason"],
+            "done": done,
+            "updated": True,
+        }
+
     # ---------- 파일 처리 ----------
 
     def _atomic_write(self, text: str) -> None:
