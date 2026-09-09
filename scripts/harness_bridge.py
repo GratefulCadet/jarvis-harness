@@ -42,6 +42,12 @@ from harness.tools.discovery import Discovery
 from harness.tools.file_store import DEFAULT_MAX_DEPTH
 from harness.tools.memory_context import MemoryContextReader
 from harness.tools.page_store import PageStore
+from harness.tools.resource_links import (
+    ProjectResources,
+    ResourceLinkError,
+    default_links_file,
+    relation_label,
+)
 from harness.tools.task_store import TaskStore, TaskValidationError
 from harness.tools.workspace import WorkspaceManager, default_registry_file
 
@@ -183,15 +189,17 @@ def _tree_snapshot(
             "title": project["title"] or project_id,
             "status": "active",
             "children": [
-                {
+                *[{
                     "id": task["id"],
                     "type": "task",
                     "title": task["title"],
                     "reason": task.get("reason", ""),
                     "status": "done" if task.get("done") else "open",
                     "parent_id": project_id,
-                }
-                for task in tasks
+                } for task in tasks],
+                # PROJECTS의 semantic projection — persisted ResourceLink만
+                # 보인다. 검색 유사성으로 자동 링크를 만들지 않는다(PART H·L).
+                *_project_resources_children(client, project_id),
             ],
         })
 
@@ -341,6 +349,71 @@ def _workspace(client: HarnessClient) -> WorkspaceManager | None:
     )
 
 
+def _resources(client: HarnessClient) -> ProjectResources | None:
+    """bridge용 ResourceLink 계층 — 레지스트리는 <memory_dir>/resource_links.json.
+
+    WorkspaceManager가 없으면(승인 루트 없음) FileRef 검증이 불가능하므로 None.
+    """
+    if client.config.memory_dir is None:
+        return None
+    workspace = _workspace(client)
+    if workspace is None:
+        return None
+    return ProjectResources(
+        default_links_file(Path(client.config.memory_dir)),
+        client.config.memory_dir,
+        workspace=workspace,
+    )
+
+
+def _project_resources_children(
+    client: HarnessClient,
+    project_id: str,
+) -> list[dict[str, Any]]:
+    """tree_snapshot용 — 프로젝트의 Resource 링크를 relation 그룹 노드로 변환.
+
+    ResourceLink는 FileRef identity만 저장하므로 현재 locator는 읽을 때
+    resolve한다 — rename/move reconciliation 결과가 링크 재작성 없이 반영된다(G).
+    """
+    resources = _resources(client)
+    if resources is None:
+        return []
+    try:
+        result = resources.list_project_resources(project_id)
+    except ResourceLinkError:
+        return []
+    if not result["resources"]:
+        return []
+
+    by_relation: dict[str, list[dict[str, Any]]] = {}
+    for res in result["resources"]:
+        by_relation.setdefault(res["relation"], []).append(res)
+
+    children: list[dict[str, Any]] = []
+    for relation in sorted(by_relation):
+        children.append({
+            "id": f"resources:{project_id}:{relation}",
+            "type": "resource_group",
+            "title": relation_label(relation),
+            "status": "active",
+            "children": [
+                {
+                    # id는 stable FileRef identity — path가 아니다(PART H).
+                    "id": f"resfile:{res['file']['id']}",
+                    "type": "project_resource",
+                    "title": res["file"].get("name") or res["file"]["id"],
+                    "status": res["file"].get("status", "ok"),
+                    "file": res["file"],
+                    "link_id": res["link_id"],
+                }
+                for res in sorted(
+                    by_relation[relation], key=lambda r: r["file"].get("name", "")
+                )
+            ],
+        })
+    return children
+
+
 def _discover_projects(
     client: HarnessClient,
     request_id: Any,
@@ -410,6 +483,127 @@ def _search_context(
         "status": "ok",
         **result,
         "scratch": _is_scratch_dir(memory_dir),
+    }
+
+
+def _link_project_file(
+    client: HarnessClient,
+    request_id: Any,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """PART F — 명시적 사용자 행동: Project→File ResourceLink 생성.
+
+    deterministic canonical write — ProjectResources가 단일 writer.
+    Permission Gate 우회가 아니라 정책 그대로: 직접 구조적 사용자 행동은
+    결정적 쓰기를, AI 제안은 승인 후 이 핸들러를 통과한다. 모델 호출 없음.
+    """
+    project_id = payload.get("project_id")
+    file_id = payload.get("file_id")
+    relation = payload.get("relation") or "reference"
+
+    if not isinstance(project_id, str) or not project_id.strip():
+        return {"type": "response", "id": request_id, "status": "error",
+                "error": "project_id가 필요합니다"}
+    if not isinstance(file_id, str) or not file_id.strip():
+        return {"type": "response", "id": request_id, "status": "error",
+                "error": "file_id(FileRef identity)가 필요합니다"}
+    if not isinstance(relation, str):
+        return {"type": "response", "id": request_id, "status": "error",
+                "error": "relation은 문자열이어야 합니다"}
+
+    resources = _resources(client)
+    if resources is None:
+        return {"type": "response", "id": request_id, "status": "error",
+                "error": "승인된 파일 루트가 없어 링크를 생성할 수 없습니다"}
+
+    try:
+        result = resources.link_project_file(
+            project_id.strip(), file_id.strip(), relation.strip()
+        )
+    except ResourceLinkError as exc:
+        return {"type": "response", "id": request_id, "status": "error",
+                "error": str(exc)}
+    except Exception as exc:  # 방어적 — 어떤 실패든 JSONL로 반환
+        return {"type": "response", "id": request_id, "status": "error",
+                "error": f"{type(exc).__name__}: {exc}"}
+
+    return {
+        "type": "response",
+        "id": request_id,
+        "status": "ok",
+        "created": result["created"],
+        "link": result["link"],
+        "scratch": _is_scratch_dir(client.config.memory_dir),
+    }
+
+
+def _list_project_resources(
+    client: HarnessClient,
+    request_id: Any,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """PART G — 프로젝트 리소스 읽기. locator는 FileRef에서 resolve. 모델 호출 없음."""
+    project_id = payload.get("project_id")
+    if not isinstance(project_id, str) or not project_id.strip():
+        return {"type": "response", "id": request_id, "status": "error",
+                "error": "project_id가 필요합니다"}
+
+    resources = _resources(client)
+    if resources is None:
+        return {"type": "response", "id": request_id, "status": "error",
+                "error": "승인된 파일 루트가 없어 리소스를 조회할 수 없습니다"}
+
+    try:
+        result = resources.list_project_resources(project_id.strip())
+    except ResourceLinkError as exc:
+        return {"type": "response", "id": request_id, "status": "error",
+                "error": str(exc)}
+    except Exception as exc:
+        return {"type": "response", "id": request_id, "status": "error",
+                "error": f"{type(exc).__name__}: {exc}"}
+
+    return {
+        "type": "response",
+        "id": request_id,
+        "status": "ok",
+        "project_id": result["project_id"],
+        "resources": result["resources"],
+        "scratch": _is_scratch_dir(client.config.memory_dir),
+    }
+
+
+def _unlink(
+    client: HarnessClient,
+    request_id: Any,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """PART K-13 — 링크 메타데이터만 제거. 사용자 파일은 절대 건드리지 않는다."""
+    link_id = payload.get("link_id")
+    if not isinstance(link_id, str) or not link_id.strip():
+        return {"type": "response", "id": request_id, "status": "error",
+                "error": "link_id가 필요합니다"}
+
+    resources = _resources(client)
+    if resources is None:
+        return {"type": "response", "id": request_id, "status": "error",
+                "error": "승인된 파일 루트가 없어 링크를 제거할 수 없습니다"}
+
+    try:
+        result = resources.unlink(link_id.strip())
+    except ResourceLinkError as exc:
+        return {"type": "response", "id": request_id, "status": "error",
+                "error": str(exc)}
+    except Exception as exc:
+        return {"type": "response", "id": request_id, "status": "error",
+                "error": f"{type(exc).__name__}: {exc}"}
+
+    return {
+        "type": "response",
+        "id": request_id,
+        "status": "ok",
+        "removed": result["removed"],
+        "link": result["link"],
+        "scratch": _is_scratch_dir(client.config.memory_dir),
     }
 
 
@@ -551,6 +745,18 @@ def handle_message(
         if message_type == "files_snapshot":
             # read-only — 승인된 루트의 파일 트리 (SYSTEM MAP FILES). 모델 호출 없음.
             return _files_snapshot(client, request_id, msg)
+
+        if message_type == "link_project_file":
+            # deterministic canonical write — 명시적 사용자 구조 행동(PART F). 모델 호출 없음.
+            return _link_project_file(client, request_id, msg)
+
+        if message_type == "list_project_resources":
+            # read-only — 프로젝트 리소스 + 현재 locator resolve. 모델 호출 없음.
+            return _list_project_resources(client, request_id, msg)
+
+        if message_type == "unlink_project_file":
+            # deterministic metadata cleanup — JARVIS 메타데이터만 제거(K-13).
+            return _unlink(client, request_id, msg)
 
         if message_type == "shutdown":
             raise SystemExit(0)

@@ -7,6 +7,7 @@ from typing import Any
 from harness.tools.file_store import FileStore, parse_roots
 from harness.tools.memory_context import MemoryContextReader
 from harness.tools.page_store import PageStore, split_frontmatter
+from harness.tools.resource_links import ProjectResources, default_links_file
 from harness.tools.task_store import TaskStore
 from harness.tools.workspace import WorkspaceManager, default_registry_file
 
@@ -66,6 +67,17 @@ class Discovery:
         self.workspace = (
             WorkspaceManager(self.files, default_registry_file(self.memory_dir))
             if self.files.roots and self.memory_dir
+            else None
+        )
+        # ResourceLink 읽기 계층(§12·§13) — search_context가 검색 일치와
+        # persisted 링크를 구분해 provenance를 실을 수 있게 한다(PART L).
+        self.resources = (
+            ProjectResources(
+                default_links_file(self.memory_dir),
+                self.memory_dir,
+                workspace=self.workspace,
+            )
+            if self.workspace is not None
             else None
         )
 
@@ -319,6 +331,21 @@ class Discovery:
                     }
                     if self.workspace is not None:
                         self.workspace.enrich_entry(entry, item["root"])
+                    if entry.get("id") and self.resources is not None:
+                        # 검색 일치 ≠ persisted 관계(§12). persisted 링크가 있을 때만
+                        # provenance를 단다 — 유사성으로 소유를 주장하지 않는다(PART L).
+                        self.resources.registry.reload()
+                        links = self.resources.registry.links_for_file(entry["id"])
+                        if links:
+                            entry["linked_projects"] = [
+                                {
+                                    "project_id": link.from_id,
+                                    "relation": link.relation,
+                                    "link_id": link.id,
+                                    "match_evidence": "persisted",  # 추론 아님
+                                }
+                                for link in links
+                            ]
                     results.append(entry)
             except ValueError:
                 pass  # 루트 없음/검색어 문제 — file 도메인만 건너뜀
