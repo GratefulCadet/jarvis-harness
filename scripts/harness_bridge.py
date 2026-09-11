@@ -393,36 +393,50 @@ def _resources(client: HarnessClient) -> ProjectResources | None:
 
 # ---------- WorkspaceRoots (persistent, picker UX) ----------
 
+def _err(request_id: Any, msg: str) -> dict[str, Any]:
+    return {"type": "response", "id": request_id, "status": "error", "error": msg}
+
+
+def _ok(request_id: Any, client: HarnessClient, **kw: Any) -> dict[str, Any]:
+    return {"type": "response", "id": request_id, "status": "ok", "scratch": _is_scratch_dir(client.config.memory_dir), **kw}
+
+
+def _ws_op(
+    client: HarnessClient, request_id: Any, op: Callable[[], Any]
+) -> dict[str, Any]:
+    """공통 try/except 래퍼 — 도메인 에러는 문자열, 나머지는 형식화."""
+    try:
+        result = op()
+    except WorkspaceRootError as exc:
+        return _err(request_id, str(exc))
+    except ProjectWorkspaceError as exc:
+        return _err(request_id, str(exc))
+    except Exception as exc:
+        return _err(request_id, f"{type(exc).__name__}: {exc}")
+    return result
+
+
 def _list_workspace_roots(
     client: HarnessClient, request_id: Any, _payload: dict[str, Any]
 ) -> dict[str, Any]:
     roots_mgr = _workspace_roots_manager(client)
     if roots_mgr is None:
-        return {"type": "response", "id": request_id, "status": "error", "error": "memory_dir 미설정 — workspace_roots를 조회할 수 없습니다"}
-    try:
-        roots = roots_mgr.list_roots()
-    except Exception as exc:
-        return {"type": "response", "id": request_id, "status": "error", "error": f"{type(exc).__name__}: {exc}"}
-    return {"type": "response", "id": request_id, "status": "ok", "roots": roots, "scratch": _is_scratch_dir(client.config.memory_dir)}
+        return _err(request_id, "memory_dir 미설정 — workspace_roots를 조회할 수 없습니다")
+    return _ws_op(client, request_id, lambda: _ok(request_id, client, roots=roots_mgr.list_roots()))
 
 
 def _register_workspace_root(
     client: HarnessClient, request_id: Any, payload: dict[str, Any]
 ) -> dict[str, Any]:
     device_path = payload.get("device_path") or payload.get("path") or payload.get("folder")
-    display_name = payload.get("display_name")
     if not isinstance(device_path, str) or not device_path.strip():
-        return {"type": "response", "id": request_id, "status": "error", "error": "device_path(폴더 경로)가 필요합니다"}
+        return _err(request_id, "device_path(폴더 경로)가 필요합니다")
     roots_mgr = _workspace_roots_manager(client)
     if roots_mgr is None:
-        return {"type": "response", "id": request_id, "status": "error", "error": "memory_dir 미설정 — workspace_roots를 등록할 수 없습니다"}
-    try:
-        result = roots_mgr.register(device_path.strip(), display_name.strip() if isinstance(display_name, str) and display_name.strip() else None)
-    except WorkspaceRootError as exc:
-        return {"type": "response", "id": request_id, "status": "error", "error": str(exc)}
-    except Exception as exc:
-        return {"type": "response", "id": request_id, "status": "error", "error": f"{type(exc).__name__}: {exc}"}
-    return {"type": "response", "id": request_id, "status": "ok", "created": result["created"], "root": result["root"], "scratch": _is_scratch_dir(client.config.memory_dir)}
+        return _err(request_id, "memory_dir 미설정 — workspace_roots를 등록할 수 없습니다")
+    display_name = payload.get("display_name")
+    dn = display_name.strip() if isinstance(display_name, str) and display_name.strip() else None
+    return _ws_op(client, request_id, lambda: _ok(request_id, client, **roots_mgr.register(device_path.strip(), dn)))
 
 
 def _update_workspace_root(
@@ -430,31 +444,20 @@ def _update_workspace_root(
 ) -> dict[str, Any]:
     root_id = payload.get("root_id") or payload.get("id")
     if not isinstance(root_id, str) or not root_id.strip():
-        return {"type": "response", "id": request_id, "status": "error", "error": "root_id가 필요합니다"}
+        return _err(request_id, "root_id가 필요합니다")
     roots_mgr = _workspace_roots_manager(client)
     if roots_mgr is None:
-        return {"type": "response", "id": request_id, "status": "error", "error": "memory_dir 미설정"}
-    display_name = payload.get("display_name")
-    device_path = payload.get("device_path") or payload.get("path")
-    # Only pass non-None updates
+        return _err(request_id, "memory_dir 미설정")
     kwargs: dict[str, Any] = {}
-    if display_name is not None:
-        if not isinstance(display_name, str):
-            return {"type": "response", "id": request_id, "status": "error", "error": "display_name은 문자열이어야 합니다"}
-        kwargs["display_name"] = display_name
-    if device_path is not None:
-        if not isinstance(device_path, str):
-            return {"type": "response", "id": request_id, "status": "error", "error": "device_path는 문자열이어야 합니다"}
-        kwargs["device_path"] = device_path
+    for key in ("display_name", "device_path"):
+        val = payload.get(key) if key == "display_name" else payload.get(key) or payload.get("path")
+        if val is not None:
+            if not isinstance(val, str):
+                return _err(request_id, f"{key}는 문자열이어야 합니다")
+            kwargs[key] = val
     if not kwargs:
-        return {"type": "response", "id": request_id, "status": "error", "error": "변경할 필드가 없습니다 (display_name 또는 device_path)"}
-    try:
-        result = roots_mgr.update(root_id.strip(), **kwargs)
-    except WorkspaceRootError as exc:
-        return {"type": "response", "id": request_id, "status": "error", "error": str(exc)}
-    except Exception as exc:
-        return {"type": "response", "id": request_id, "status": "error", "error": f"{type(exc).__name__}: {exc}"}
-    return {"type": "response", "id": request_id, "status": "ok", "root": result["root"], "updated": result["updated"], "scratch": _is_scratch_dir(client.config.memory_dir)}
+        return _err(request_id, "변경할 필드가 없습니다 (display_name 또는 device_path)")
+    return _ws_op(client, request_id, lambda: _ok(request_id, client, **roots_mgr.update(root_id.strip(), **kwargs)))
 
 
 def _remove_workspace_root(
@@ -462,17 +465,11 @@ def _remove_workspace_root(
 ) -> dict[str, Any]:
     root_id = payload.get("root_id") or payload.get("id")
     if not isinstance(root_id, str) or not root_id.strip():
-        return {"type": "response", "id": request_id, "status": "error", "error": "root_id가 필요합니다"}
+        return _err(request_id, "root_id가 필요합니다")
     roots_mgr = _workspace_roots_manager(client)
     if roots_mgr is None:
-        return {"type": "response", "id": request_id, "status": "error", "error": "memory_dir 미설정"}
-    try:
-        result = roots_mgr.remove(root_id.strip())
-    except WorkspaceRootError as exc:
-        return {"type": "response", "id": request_id, "status": "error", "error": str(exc)}
-    except Exception as exc:
-        return {"type": "response", "id": request_id, "status": "error", "error": f"{type(exc).__name__}: {exc}"}
-    return {"type": "response", "id": request_id, "status": "ok", "removed": result["removed"], "root": result["root"], "scratch": _is_scratch_dir(client.config.memory_dir)}
+        return _err(request_id, "memory_dir 미설정")
+    return _ws_op(client, request_id, lambda: _ok(request_id, client, **roots_mgr.remove(root_id.strip())))
 
 
 def _connect_project_workspace(
@@ -481,41 +478,31 @@ def _connect_project_workspace(
     """One-gesture: register/reuse root + set project primary workspace (PART F)."""
     project_id = payload.get("project_id")
     device_path = payload.get("device_path") or payload.get("path") or payload.get("folder")
-    display_name = payload.get("display_name")
     if not isinstance(project_id, str) or not project_id.strip():
-        return {"type": "response", "id": request_id, "status": "error", "error": "project_id가 필요합니다"}
+        return _err(request_id, "project_id가 필요합니다")
     if not isinstance(device_path, str) or not device_path.strip():
-        return {"type": "response", "id": request_id, "status": "error", "error": "device_path(폴더 경로)가 필요합니다"}
+        return _err(request_id, "device_path(폴더 경로)가 필요합니다")
     memory_dir = client.config.memory_dir
     if memory_dir is None or not Path(memory_dir).is_dir():
-        return {"type": "response", "id": request_id, "status": "error", "error": "memory_dir 미설정"}
+        return _err(request_id, "memory_dir 미설정")
     roots_mgr = _workspace_roots_manager(client)
     if roots_mgr is None:
-        return {"type": "response", "id": request_id, "status": "error", "error": "memory_dir 미설정"}
-    try:
-        reg_result = roots_mgr.register(device_path.strip(), display_name.strip() if isinstance(display_name, str) and display_name.strip() else None)
-    except WorkspaceRootError as exc:
-        return {"type": "response", "id": request_id, "status": "error", "error": str(exc)}
-    except Exception as exc:
-        return {"type": "response", "id": request_id, "status": "error", "error": f"{type(exc).__name__}: {exc}"}
-    root_id = reg_result["root"]["id"]
-    # Now set primary workspace using Discovery's effective roots (registry now includes it)
-    try:
+        return _err(request_id, "memory_dir 미설정")
+    display_name = payload.get("display_name")
+    dn = display_name.strip() if isinstance(display_name, str) and display_name.strip() else None
+
+    def _connect() -> dict[str, Any]:
+        reg = roots_mgr.register(device_path.strip(), dn)
         workspaces = _project_workspaces(client)
         if workspaces is None:
-            return {"type": "response", "id": request_id, "status": "error", "error": "memory_dir 미설정 — workspace 관계를 설정할 수 없습니다"}
-        ws_result = workspaces.set_project_primary_workspace(project_id.strip(), root_id)
-    except (ProjectWorkspaceError, WorkspaceRootError) as exc:
-        return {"type": "response", "id": request_id, "status": "error", "error": str(exc)}
-    except Exception as exc:
-        return {"type": "response", "id": request_id, "status": "error", "error": f"{type(exc).__name__}: {exc}"}
-    return {
-        "type": "response", "id": request_id, "status": "ok",
-        "root": reg_result["root"], "root_created": reg_result["created"],
-        "project_id": ws_result["project_id"], "root_id": ws_result["root_id"],
-        "updated": ws_result["updated"], "workspace": ws_result["workspace"],
-        "scratch": _is_scratch_dir(memory_dir),
-    }
+            raise ProjectWorkspaceError("memory_dir 미설정 — workspace 관계를 설정할 수 없습니다")
+        ws = workspaces.set_project_primary_workspace(project_id.strip(), reg["root"]["id"])
+        return _ok(request_id, client,
+                   root=reg["root"], root_created=reg["created"],
+                   project_id=ws["project_id"], root_id=ws["root_id"],
+                   updated=ws["updated"], workspace=ws["workspace"])
+
+    return _ws_op(client, request_id, _connect)
 
 
 def _project_workspaces(client: HarnessClient) -> ProjectWorkspaces | None:
@@ -819,46 +806,19 @@ def _set_project_workspace(
     request_id: Any,
     payload: dict[str, Any],
 ) -> dict[str, Any]:
-    """PART I — 명시적 사용자 행동: Project → primary WorkspaceRoot 설정.
-
-    deterministic canonical metadata write — ProjectWorkspaces가 단일 writer.
-    모델 호출 없음. root_id는 논리 identity만 — 절대 경로는 하드 거부.
-    """
+    """PART I — Project → primary WorkspaceRoot 설정 (canonical metadata write)."""
     project_id = payload.get("project_id")
     root_id = payload.get("root_id")
     if not isinstance(project_id, str) or not project_id.strip():
-        return {"type": "response", "id": request_id, "status": "error",
-                "error": "project_id가 필요합니다"}
+        return _err(request_id, "project_id가 필요합니다")
     if not isinstance(root_id, str) or not root_id.strip():
-        return {"type": "response", "id": request_id, "status": "error",
-                "error": "root_id(논리 root identity)가 필요합니다"}
-
+        return _err(request_id, "root_id(논리 root identity)가 필요합니다")
     workspaces = _project_workspaces(client)
     if workspaces is None:
-        return {"type": "response", "id": request_id, "status": "error",
-                "error": "memory_dir 미설정 — workspace 관계를 설정할 수 없습니다"}
-
-    try:
-        result = workspaces.set_project_primary_workspace(
-            project_id.strip(), root_id.strip()
-        )
-    except ProjectWorkspaceError as exc:
-        return {"type": "response", "id": request_id, "status": "error",
-                "error": str(exc)}
-    except Exception as exc:  # 방어적 — 어떤 실패든 JSONL로 반환
-        return {"type": "response", "id": request_id, "status": "error",
-                "error": f"{type(exc).__name__}: {exc}"}
-
-    return {
-        "type": "response",
-        "id": request_id,
-        "status": "ok",
-        "project_id": result["project_id"],
-        "root_id": result["root_id"],
-        "updated": result["updated"],
-        "workspace": result["workspace"],
-        "scratch": _is_scratch_dir(client.config.memory_dir),
-    }
+        return _err(request_id, "memory_dir 미설정 — workspace 관계를 설정할 수 없습니다")
+    return _ws_op(client, request_id, lambda: _ok(
+        request_id, client, **workspaces.set_project_primary_workspace(project_id.strip(), root_id.strip())
+    ))
 
 
 def _get_project_workspace(
@@ -866,34 +826,18 @@ def _get_project_workspace(
     request_id: Any,
     payload: dict[str, Any],
 ) -> dict[str, Any]:
-    """PART D·E — 관계 + 현재 디바이스 가용성 조회. 모델 호출 없음."""
+    """PART D·E — 관계 + 현재 디바이스 가용성 조회."""
     project_id = payload.get("project_id")
     if not isinstance(project_id, str) or not project_id.strip():
-        return {"type": "response", "id": request_id, "status": "error",
-                "error": "project_id가 필요합니다"}
-
+        return _err(request_id, "project_id가 필요합니다")
     workspaces = _project_workspaces(client)
     if workspaces is None:
-        return {"type": "response", "id": request_id, "status": "error",
-                "error": "memory_dir 미설정 — workspace 관계를 조회할 수 없습니다"}
-
-    try:
-        workspace = workspaces.get_project_primary_workspace(project_id.strip())
-    except ProjectWorkspaceError as exc:
-        return {"type": "response", "id": request_id, "status": "error",
-                "error": str(exc)}
-    except Exception as exc:
-        return {"type": "response", "id": request_id, "status": "error",
-                "error": f"{type(exc).__name__}: {exc}"}
-
-    return {
-        "type": "response",
-        "id": request_id,
-        "status": "ok",
-        "project_id": project_id.strip(),
-        "workspace": workspace,  # 관계 없음 = None (fabricate 금지)
-        "scratch": _is_scratch_dir(client.config.memory_dir),
-    }
+        return _err(request_id, "memory_dir 미설정 — workspace 관계를 조회할 수 없습니다")
+    return _ws_op(client, request_id, lambda: _ok(
+        request_id, client,
+        project_id=project_id.strip(),
+        workspace=workspaces.get_project_primary_workspace(project_id.strip()),
+    ))
 
 
 def _clear_project_workspace(
@@ -901,34 +845,16 @@ def _clear_project_workspace(
     request_id: Any,
     payload: dict[str, Any],
 ) -> dict[str, Any]:
-    """PART J-8 — 관계 메타데이터만 제거. 사용자 폴더는 건드리지 않는다."""
+    """PART J-8 — 관계 메타데이터만 제거."""
     project_id = payload.get("project_id")
     if not isinstance(project_id, str) or not project_id.strip():
-        return {"type": "response", "id": request_id, "status": "error",
-                "error": "project_id가 필요합니다"}
-
+        return _err(request_id, "project_id가 필요합니다")
     workspaces = _project_workspaces(client)
     if workspaces is None:
-        return {"type": "response", "id": request_id, "status": "error",
-                "error": "memory_dir 미설정 — workspace 관계를 해제할 수 없습니다"}
-
-    try:
-        result = workspaces.clear_project_primary_workspace(project_id.strip())
-    except ProjectWorkspaceError as exc:
-        return {"type": "response", "id": request_id, "status": "error",
-                "error": str(exc)}
-    except Exception as exc:
-        return {"type": "response", "id": request_id, "status": "error",
-                "error": f"{type(exc).__name__}: {exc}"}
-
-    return {
-        "type": "response",
-        "id": request_id,
-        "status": "ok",
-        "project_id": result["project_id"],
-        "removed": result["removed"],
-        "scratch": _is_scratch_dir(client.config.memory_dir),
-    }
+        return _err(request_id, "memory_dir 미설정 — workspace 관계를 해제할 수 없습니다")
+    return _ws_op(client, request_id, lambda: _ok(
+        request_id, client, **workspaces.clear_project_primary_workspace(project_id.strip())
+    ))
 
 
 def _files_snapshot(

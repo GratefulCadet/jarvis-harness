@@ -375,84 +375,53 @@ class WorkspaceRoots:
         if entry is None:
             raise WorkspaceRootError(f"존재하지 않는 WorkspaceRoot입니다: {root_id!r}")
 
-        # Check dependencies — require explicit detach first
+        # Check dependencies via existing domain APIs — no raw JSON parsing.
         dependencies: list[str] = []
         if self.memory_dir is not None and self.memory_dir.is_dir():
-            # Check ProjectWorkspaces
+            # 1. ProjectWorkspaces — any project using this root as primary
             try:
-                from harness.tools.project_workspaces import (
-                    ProjectWorkspaces,
-                    default_project_workspaces_file,
-                )
+                from harness.tools.project_workspaces import ProjectWorkspaces, default_project_workspaces_file
 
-                # We need roots dict to construct ProjectWorkspaces — pass empty to avoid circular dep;
-                # get all project→root mappings and check
-                pw_file = default_project_workspaces_file(self.memory_dir)
-                if pw_file.exists():
-                    try:
-                        raw = json.loads(pw_file.read_text(encoding="utf-8"))
-                        projects = raw.get("projects", {}) if isinstance(raw, dict) else {}
-                        for pid, mapping in projects.items():
-                            if isinstance(mapping, dict) and mapping.get("root_id") == root_id:
-                                dependencies.append(f"project:{pid} primary workspace")
-                    except (json.JSONDecodeError, OSError):
-                        pass
+                pw = ProjectWorkspaces(default_project_workspaces_file(self.memory_dir), self.memory_dir, roots={})
+                pw.reload()
+                for pid, mapping in pw._entries.items():
+                    if mapping.get("root_id") == root_id:
+                        dependencies.append(f"project:{pid} primary workspace")
             except ImportError:
                 pass
 
-            # Check ResourceLinks — files under this root
-            # We can only check if we have file_refs registry
+            # 2. FileRefRegistry — active file references under this root
+            file_ids_in_root: set[str] = set()
             try:
-                from harness.tools.workspace import default_registry_file
+                from harness.tools.workspace import FileRefRegistry, default_registry_file
 
-                reg_file = default_registry_file(self.memory_dir)
-                if reg_file.exists():
-                    try:
-                        raw = json.loads(reg_file.read_text(encoding="utf-8"))
-                        refs = raw.get("refs", []) if isinstance(raw, dict) else []
-                        for ref in refs:
-                            if isinstance(ref, dict) and ref.get("root_id") == root_id and not ref.get("missing"):
-                                dependencies.append(f"file:{ref.get('id')} ({ref.get('relative_path')})")
-                                if len(dependencies) > 5:
-                                    dependencies.append("... and more")
-                                    break
-                    except (json.JSONDecodeError, OSError):
-                        pass
+                reg = FileRefRegistry(default_registry_file(self.memory_dir))
+                reg.reload()
+                for ref in reg.refs.values():
+                    if ref.root_id == root_id and not ref.missing:
+                        file_ids_in_root.add(ref.id)
+                        dependencies.append(f"file:{ref.id} ({ref.relative_path})")
+                        if len(dependencies) > 5:
+                            dependencies.append("... and more")
+                            break
             except ImportError:
                 pass
 
-            # Also check resource_links for any link whose FileRef belongs to this root
-            try:
-                from harness.tools.resource_links import default_links_file
+            # 3. ResourceLinks — any link whose to_id references a file in this root
+            if file_ids_in_root:
+                try:
+                    from harness.tools.resource_links import ResourceLinkRegistry, default_links_file
 
-                links_file = default_links_file(self.memory_dir)
-                if links_file.exists():
-                    try:
-                        raw = json.loads(links_file.read_text(encoding="utf-8"))
-                        links = raw.get("links", []) if isinstance(raw, dict) else []
-                        # Need to know which file ids belong to this root
-                        file_ids_in_root: set[str] = set()
-                        reg_file = default_registry_file(self.memory_dir)
-                        if reg_file.exists():
-                            try:
-                                reg_raw = json.loads(reg_file.read_text(encoding="utf-8"))
-                                for ref in reg_raw.get("refs", []) if isinstance(reg_raw, dict) else []:
-                                    if isinstance(ref, dict) and ref.get("root_id") == root_id:
-                                        fid = ref.get("id")
-                                        if isinstance(fid, str):
-                                            file_ids_in_root.add(fid)
-                            except (json.JSONDecodeError, OSError):
-                                pass
-                        for link in links:
-                            if isinstance(link, dict) and link.get("to_id") in file_ids_in_root:
-                                dependencies.append(f"resource_link:{link.get('id')} (project:{link.get('from_id')})")
-                                if len(dependencies) > 8:
-                                    dependencies.append("... and more")
-                                    break
-                    except (json.JSONDecodeError, OSError):
-                        pass
-            except ImportError:
-                pass
+                    lr = ResourceLinkRegistry(default_links_file(self.memory_dir))
+                    lr.reload()
+                    for link in lr.links.values():
+                        if link.to_id in file_ids_in_root:
+                            dependencies.append(f"resource_link:{link.id} (project:{link.from_id})")
+                            if len(dependencies) > 8:
+                                dependencies.append("... and more")
+                                break
+                except ImportError:
+                    pass
 
         if dependencies:
             raise WorkspaceRootError(
