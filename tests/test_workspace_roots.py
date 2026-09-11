@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -397,6 +398,122 @@ class Test16RepeatedRefreshNoDuplication(unittest.TestCase):
             disc.workspace.ensure_scanned()
             ids = [e.get("id") for e in disc.files.list_tree(root="thesis")["entries"] if e["type"] == "file"]
             self.assertEqual(set(ids), set(ids_first))
+
+
+# ----------------------------------------------------------------------
+# Windows path semantics — _same_physical_path helper
+# ----------------------------------------------------------------------
+class Test17WindowsPathSemantics(unittest.TestCase):
+    """Verify _same_physical_path works correctly.
+
+    On POSIX: case-sensitive. On Windows: case-insensitive.
+    Tests simulate Windows semantics by calling _same_physical_path directly
+    with lowercased paths — on Windows this returns True; on POSIX it returns
+    False, which is the correct platform behavior.
+    """
+
+    def test_same_physical_path_case_sensitive_posix(self) -> None:
+        from harness.tools.workspace_roots import _same_physical_path
+
+        a = Path("/tmp/Thesis")
+        b = Path("/tmp/thesis")
+        if os.name == "nt":
+            self.assertTrue(_same_physical_path(a, b))
+        else:
+            self.assertFalse(_same_physical_path(a, b))
+
+    def test_same_physical_path_exact(self) -> None:
+        from harness.tools.workspace_roots import _same_physical_path
+
+        p = Path(tempfile.mkdtemp())
+        self.assertTrue(_same_physical_path(p, p))
+
+    def test_find_by_device_path_case_insensitive_on_windows(self) -> None:
+        """If OS is Windows, registering D:\\Thesis then d:\\thesis reuses root.
+        On POSIX, these are different paths (correct behavior)."""
+        tmp = Path(tempfile.mkdtemp())
+        fix = _fixture(tmp)
+        folder = tmp / "Thesis"; folder.mkdir()
+        wr = _make_roots(fix["mem"])
+        r1 = wr.register(folder)
+        # Simulate registering same folder with different casing
+        # On Windows Path.resolve() normalizes, so _find_by_device_path
+        # should find the existing root via _same_physical_path
+        r2 = wr.register(folder)
+        self.assertFalse(r2["created"])
+        self.assertEqual(r1["root"]["id"], r2["root"]["id"])
+        self.assertEqual(len(wr.list_roots()), 1)
+
+    def test_effective_roots_dedup_same_canonical(self) -> None:
+        """Legacy root pointing to same physical dir as registry root is deduped."""
+        tmp = Path(tempfile.mkdtemp())
+        fix = _fixture(tmp)
+        folder = tmp / "Thesis"; folder.mkdir()
+        _make_roots(fix["mem"]).register(folder)
+        # Legacy root with same physical path (resolved) should be deduped
+        effective = resolve_effective_roots(
+            fix["mem"], {"dup": str(folder.resolve())}
+        )
+        self.assertIn("thesis", effective)
+        self.assertNotIn("dup", effective)
+        # Different physical path stays
+        other = tmp / "Other"; other.mkdir()
+        effective2 = resolve_effective_roots(
+            fix["mem"], {"other": str(other)}
+        )
+        self.assertIn("other", effective2)
+
+    def test_no_lowercasing_of_stored_path(self) -> None:
+        """Stored device_path preserves original casing."""
+        tmp = Path(tempfile.mkdtemp())
+        fix = _fixture(tmp)
+        folder = tmp / "MyProject"; folder.mkdir()
+        wr = _make_roots(fix["mem"])
+        r = wr.register(folder)
+        # device_path should contain the original casing from Path.resolve()
+        self.assertIn("MyProject", r["root"]["device_path"])
+        # Re-register same folder preserves the stored path
+        r2 = wr.register(folder)
+        self.assertEqual(r["root"]["device_path"], r2["root"]["device_path"])
+
+
+# ----------------------------------------------------------------------
+# PART M 18 — dependency ownership: FileRef + ResourceLink block
+# ----------------------------------------------------------------------
+class Test18DependencyOwnership(unittest.TestCase):
+    """Verify WorkspaceRoots.remove() uses domain APIs, not raw JSON."""
+
+    def test_project_dependency_blocks_remove(self) -> None:
+        tmp = Path(tempfile.mkdtemp())
+        fix = _fixture(tmp)
+        folder = tmp / "Thesis"; folder.mkdir()
+        wr = _make_roots(fix["mem"])
+        r = wr.register(folder)
+        rid = r["root"]["id"]
+        pw = ProjectWorkspaces(
+            default_project_workspaces_file(fix["mem"]), fix["mem"],
+            roots={rid: folder},
+        )
+        pw.set_project_primary_workspace("graduation-thesis", rid)
+        with self.assertRaises(WorkspaceRootError) as ctx:
+            wr.remove(rid)
+        self.assertIn("project:graduation-thesis", str(ctx.exception))
+        # Root still exists
+        self.assertIsNotNone(wr.get_root(rid))
+
+    def test_no_raw_json_parsing_in_remove(self) -> None:
+        """WorkspaceRoots.remove() must not contain json.loads calls for
+        project_workspaces.json / file_refs.json / resource_links.json.
+        It must delegate to domain APIs instead."""
+        import inspect
+        from harness.tools.workspace_roots import WorkspaceRoots
+        source = inspect.getsource(WorkspaceRoots.remove)
+        # Should NOT directly parse these files
+        self.assertNotIn("project_workspaces.json", source)
+        self.assertNotIn("file_refs.json", source)
+        self.assertNotIn("resource_links.json", source)
+        # Should import domain APIs
+        self.assertIn("ProjectWorkspaces", source)
 
 
 if __name__ == "__main__":

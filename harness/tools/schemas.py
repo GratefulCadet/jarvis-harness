@@ -162,7 +162,9 @@ def list_files() -> ToolSchema:
             "승인된 파일 루트 아래의 폴더·파일 구조를 조회한다 (읽기 전용). "
             "사용자가 파일이나 폴더 구조를 물으면 사용한다. path는 루트 기준 상대 "
             "경로(생략 시 루트 전체). 루트가 여러 개면 root로 하나를 고른다. "
-            "승인된 루트가 없으면 설정 방법을 안내한다."
+            "승인된 루트가 없으면 설정 방법을 안내한다. "
+            "list_projects의 primary_workspace.root_id를 root로 전달하면 "
+            "프로젝트 워크스페이스 내 파일만 탐색할 수 있다."
         ),
         {
             "root": {
@@ -216,7 +218,9 @@ def search_files() -> ToolSchema:
         (
             "승인된 파일 루트 안에서 파일 이름·경로·텍스트 내용을 검색한다 "
             "(읽기 전용, 결과 수 제한). '파일에서 LPIPS 찾아줘' 같은 요청에 사용한다. "
-            "프로젝트·task·지식 페이지까지 두루 찾으려면 search_context를 먼저 고려한다."
+            "프로젝트·task·지식 페이지까지 두루 찾으려면 search_context를 먼저 고려한다. "
+            "list_projects의 primary_workspace.root_id를 root로 전달하면 "
+            "프로젝트 워크스페이스 내 파일만 검색할 수 있다."
         ),
         {
             "query": {

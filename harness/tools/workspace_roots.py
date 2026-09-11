@@ -60,22 +60,22 @@ def resolve_effective_roots(
                 legacy_dict = parse_roots(str(legacy_file_roots))
         except Exception:
             legacy_dict = {}
-    # Dedup legacy against registry
+    # Dedup legacy against registry (platform-aware case comparison)
     effective: dict[str, Path] = dict(registry_dict)
-    registry_canonicals: set[str] = set()
+    registry_resolved: list[Path] = []
     for p in registry_dict.values():
         try:
-            registry_canonicals.add(str(p.resolve()))
+            registry_resolved.append(p.resolve())
         except OSError:
-            registry_canonicals.add(str(p))
+            registry_resolved.append(p)
     for rid, path in legacy_dict.items():
         if rid in effective:
             continue
         try:
-            canon = str(Path(path).resolve())
+            canon = path.resolve()
         except OSError:
-            canon = str(path)
-        if canon in registry_canonicals:
+            canon = path
+        if any(_same_physical_path(canon, rp) for rp in registry_resolved):
             continue
         effective[rid] = path
     return effective
@@ -119,6 +119,22 @@ def _is_path_like_id(text: str) -> bool:
     if text.startswith("."):
         return True
     return False
+
+
+def _same_physical_path(a: Path, b: Path) -> bool:
+    """Platform-aware physical path equality for dedup.
+
+    Windows: case-insensitive (D:\\Thesis == d:\\thesis).
+    POSIX: case-sensitive.
+    Stored/displayed path casing is never altered.
+    """
+    try:
+        ra, rb = a.resolve(), b.resolve()
+    except OSError:
+        return str(a) == str(b)
+    if os.name == "nt":
+        return str(ra).lower() == str(rb).lower()
+    return ra == rb
 
 
 class WorkspaceRoots:
@@ -208,13 +224,12 @@ class WorkspaceRoots:
 
     def _find_by_device_path(self, canonical: Path) -> str | None:
         """Return root_id whose device_path resolves to same canonical path, if any."""
-        target = str(canonical)
         for rid, entry in self._entries.items():
             try:
-                existing = str(Path(entry["device_path"]).expanduser().resolve())
+                existing = Path(entry["device_path"]).expanduser().resolve()
             except OSError:
                 continue
-            if existing == target:
+            if _same_physical_path(existing, canonical):
                 return rid
         return None
 
