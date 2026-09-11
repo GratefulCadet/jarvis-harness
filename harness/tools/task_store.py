@@ -42,7 +42,22 @@ class TaskValidationError(ValueError):
     """인자 검증 실패 — tool 결과로 LLM에 되돌려 수정·재시도하게 한다(§8.3-3)."""
 
 
-def _task_id(project_id: str, title: str, reason: str) -> str:
+def _new_task_id() -> str:
+    """Generate content-independent immutable task ID.
+
+    UUID4-derived hex ensures uniqueness without depending on title/reason.
+    Collision check is performed by the caller against persisted IDs.
+    """
+    return f"t-{uuid.uuid4().hex[:12]}"
+
+
+def _normalize_for_dedup(text: str) -> str:
+    """Normalize title/reason for duplicate detection (not identity)."""
+    return re.sub(r"\s+", " ", (text or "").strip()).lower()
+
+
+# Legacy helper — kept for test/migration tooling only. NOT used at runtime.
+def _task_id_legacy(project_id: str, title: str, reason: str) -> str:
     digest = hashlib.sha1(
         f"{project_id}|{title}|{reason}".encode("utf-8")
     ).hexdigest()
@@ -121,28 +136,37 @@ class TaskStore:
         title: str,
         reason: str | None = None,
     ) -> dict[str, Any]:
-        """task 생성. 동일 제안 재실행 시 기존 task를 반환하고 쓰지 않는다(멱등)."""
+        """task 생성. 동일 제안 재실행 시 기존 task를 반환하고 쓰지 않는다(멱등).
+
+        ID는 content와 무관한 불변 ID (UUID 기반)로 생성된다.
+        중복 감지는 title+reason 정규화 기반으로 ID 생성과 분리된다.
+        """
         project = self._check_project_id(project_id)
         title = self._check_text(title, "title", _MAX_TITLE, required=True)
         reason = self._check_text(reason, "reason", _MAX_REASON, required=False)
-        task_id = _task_id(project, title, reason)
-        entry = _format_entry(task_id, title, reason)
 
+        # Duplicate detection: same project + same normalized title + same normalized reason
         if self.task_file.exists():
             text = self.task_file.read_text(encoding="utf-8")
-            existing = self._find_entry(text, project, task_id)
-            if existing is not None:
+            dup = self._find_duplicate(text, project, title, reason)
+            if dup is not None:
                 return {
-                    "id": task_id,
+                    "id": dup["id"],
                     "project_id": project,
-                    "title": existing["title"],
-                    "reason": existing["reason"],
+                    "title": dup["title"],
+                    "reason": dup["reason"],
                     "created": False,
                 }
-            new_text = self._append_entry(text, project, entry)
+            # Generate ID with collision check
+            existing_ids = {e["id"] for e in self._parse(text)}
+            task_id = _new_task_id()
+            while task_id in existing_ids:
+                task_id = _new_task_id()
+            new_text = self._append_entry(text, project, _format_entry(task_id, title, reason))
         else:
+            task_id = _new_task_id()
             new_text = (
-                f"# Tasks\n\n## {project}\n\n{entry}\n"
+                f"# Tasks\n\n## {project}\n\n{_format_entry(task_id, title, reason)}\n"
             )
         self._atomic_write(new_text)
         return {
@@ -297,6 +321,24 @@ class TaskStore:
             ),
             None,
         )
+
+    @staticmethod
+    def _find_duplicate(
+        text: str, project_id: str, title: str, reason: str
+    ) -> dict[str, Any] | None:
+        """Search for existing task with same normalized title + reason in project.
+
+        This is creation policy (idempotency), not identity.
+        """
+        norm_title = _normalize_for_dedup(title)
+        norm_reason = _normalize_for_dedup(reason)
+        for entry in TaskStore._parse(text):
+            if entry["project_id"] != project_id:
+                continue
+            if (_normalize_for_dedup(entry["title"]) == norm_title
+                    and _normalize_for_dedup(entry["reason"]) == norm_reason):
+                return entry
+        return None
 
     @staticmethod
     def _append_entry(text: str, project_id: str, entry: str) -> str:
