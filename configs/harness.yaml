@@ -13,7 +13,7 @@ tool_loop_max_turns: 4
 
 generation:
   temperature: 0.6
-  num_predict: 240
+  num_predict: 2048
 
 trace:
   enabled: true

@@ -245,14 +245,24 @@ class Discovery:
                         match_detail = pw.get("display_name") or pw.get("device_path", "")
             if matched_on is None:
                 continue
-            results.append({
+            entry: dict[str, Any] = {
                 "id": project_id,
                 "type": "project",
                 "title": title or project_id,
                 "matched_on": matched_on,
                 "matched_text": match_detail,
                 "rank": rank,
-            })
+            }
+            # Include primary_workspace so Qwen can extract root_id for scoped file search
+            if self.project_workspaces is not None:
+                pw_info = self.project_workspaces.get_project_primary_workspace(project_id)
+                if pw_info is not None:
+                    entry["primary_workspace"] = {
+                        "root_id": pw_info["root_id"],
+                        "display_name": pw_info["display_name"],
+                        "available": pw_info["available"],
+                    }
+            results.append(entry)
 
         results.sort(key=lambda item: (item["rank"], item["id"]))
         max_results = max(1, min(int(limit or _DEFAULT_SEARCH_LIMIT), _MAX_SEARCH_RESULTS))

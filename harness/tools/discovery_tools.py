@@ -148,11 +148,23 @@ def build_file_tools(
     """
     tools: list[Tool] = []
 
+    # Resolve effective roots: file_roots + persistent registry
+    effective_roots: dict[str, str] | None = file_roots
+    if memory_dir is not None and (file_roots is None or (isinstance(file_roots, dict) and not file_roots)):
+        try:
+            from harness.tools.workspace_roots import resolve_effective_roots  # noqa: PLC0415
+
+            resolved = resolve_effective_roots(memory_dir, file_roots)
+            if resolved:
+                effective_roots = {k: str(v) for k, v in resolved.items()}
+        except Exception:
+            pass
+
     files = None
-    if isinstance(file_roots, dict) and file_roots:
-        files = FileStore(file_roots)
+    if isinstance(effective_roots, dict) and effective_roots:
+        files = FileStore(effective_roots)
     else:
-        files = FileStore(parse_roots(file_roots))
+        files = FileStore(parse_roots(effective_roots))
     workspace = _build_workspace(files, memory_dir)
 
     # list_files
