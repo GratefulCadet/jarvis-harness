@@ -182,9 +182,13 @@ def build_file_tools(
         ))
     else:
         def list_handler(arguments: dict[str, Any]) -> dict[str, Any]:
+            path = arguments.get("path")
+            # Normalize "/" and empty string to None (list root)
+            if isinstance(path, str) and path.strip() in ('', '/'):
+                path = None
             result = files.list_tree(
                 root=arguments.get("root"),
-                relative=arguments.get("path"),
+                relative=path,
                 max_depth=arguments.get("depth") or DEFAULT_MAX_DEPTH,
             )
             if workspace is not None:
