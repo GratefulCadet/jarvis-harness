@@ -267,6 +267,105 @@ class TaskStore:
             "updated": True,
         }
 
+    def update_task(
+        self,
+        project_id: str,
+        task_id: str,
+        title: str | None = None,
+        reason: str | None = None,
+    ) -> dict[str, Any]:
+        """Task title/reason 편집 (canonical writer).
+
+        - project must exist, task must exist in that project
+        - Task ID never changes
+        - partial update: title only, reason only, or both
+        - duplicate protection: reject if resulting title+reason matches another task
+        - idempotent: same values → updated:false
+        """
+        project = self._check_project_id(project_id)
+        if not isinstance(task_id, str) or not task_id.strip():
+            raise TaskValidationError("task_id는 비어 있을 수 없습니다")
+        tid = task_id.strip()
+
+        if title is None and reason is None:
+            raise TaskValidationError("title 또는 reason 중 하나 이상 제공해야 합니다")
+
+        if not self.task_file.exists():
+            raise TaskValidationError("tasks.md가 없습니다")
+
+        text = self.task_file.read_text(encoding="utf-8")
+        target = self._find_entry(text, project, tid)
+        if target is None:
+            raise TaskValidationError(
+                f"알 수 없는 task: {tid!r} (project: {project!r})"
+            )
+
+        new_title = target["title"] if title is None else self._check_text(title, "title", _MAX_TITLE, required=True)
+        new_reason = target["reason"] if reason is None else self._check_text(reason, "reason", _MAX_REASON, required=False)
+
+        # Idempotency: no change → no write
+        if new_title == target["title"] and new_reason == target["reason"]:
+            return {
+                "id": tid,
+                "project_id": project,
+                "title": target["title"],
+                "reason": target["reason"],
+                "done": target["done"],
+                "updated": False,
+            }
+
+        # Duplicate protection: check other tasks in same project
+        for entry in self._parse(text):
+            if entry["project_id"] != project or entry["id"] == tid:
+                continue
+            if (_normalize_for_dedup(entry["title"]) == _normalize_for_dedup(new_title)
+                    and _normalize_for_dedup(entry["reason"]) == _normalize_for_dedup(new_reason)):
+                raise TaskValidationError(
+                    f"동일한 title+reason을 가진 task가 이미 존재합니다: {entry['id']!r}"
+                )
+
+        # Line-level replacement — preserve done state and leading whitespace
+        lines = text.split("\n")
+        current: str | None = None
+        replaced = False
+        for idx, raw in enumerate(lines):
+            stripped = raw.strip()
+            if stripped.startswith("## "):
+                current = stripped[3:].strip()
+                continue
+            if current != project:
+                continue
+            m = _ENTRY_RE.match(stripped)
+            if not m:
+                continue
+            rest = m.group(2).strip()
+            cand_id, sep, _ = rest.partition(": ")
+            if not sep:
+                continue
+            if cand_id.strip() != tid:
+                continue
+            leading = raw[: len(raw) - len(raw.lstrip(" \t"))] if raw.strip() else ""
+            lines[idx] = f"{leading}{_format_entry(tid, new_title, new_reason)}"
+            replaced = True
+            break
+        if not replaced:
+            raise TaskValidationError(
+                f"task 라인을 찾을 수 없습니다: {tid!r}"
+            )
+
+        new_text = "\n".join(lines)
+        if not new_text.endswith("\n"):
+            new_text += "\n"
+        self._atomic_write(new_text)
+        return {
+            "id": tid,
+            "project_id": project,
+            "title": new_title,
+            "reason": new_reason,
+            "done": target["done"],
+            "updated": True,
+        }
+
     # ---------- 파일 처리 ----------
 
     def _atomic_write(self, text: str) -> None:

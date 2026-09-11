@@ -230,11 +230,14 @@ def _update_task(
     request_id: Any,
     payload: dict[str, Any],
 ) -> dict[str, Any]:
-    """SYSTEM MAP Complete/Reopen → canonical TaskStore write (deterministic, no LLM).
+    """SYSTEM MAP task mutation → canonical TaskStore write (deterministic, no LLM).
+
+    Supports:
+    - done/open toggle (done: bool)
+    - title/reason edit (title?: str, reason?: str)
+    - both simultaneously
 
     Direct explicit user action — no Permission Gate round-trip.
-    Reuses TaskStore.set_done as single writer; does not duplicate parser logic.
-    Flips `- [ ]` ↔ `- [x]` and returns the updated entry. model 호출 없음.
     """
     memory_dir = client.config.memory_dir
     if memory_dir is None or not Path(memory_dir).is_dir():
@@ -246,23 +249,28 @@ def _update_task(
         }
 
     project_id = payload.get("project_id")
-    # allow both `task_id` and legacy `taskId`/`id` keys for robustness
     task_id = payload.get("task_id") or payload.get("taskId") or payload.get("id")
     done = payload.get("done")
-
-    # `done` must be boolean — bridge validates before TaskStore to give clear error
-    if not isinstance(done, bool):
-        return {
-            "type": "response",
-            "id": request_id,
-            "status": "error",
-            "error": "done은 boolean이어야 합니다",
-        }
+    title = payload.get("title")
+    reason = payload.get("reason")
 
     task_file = client.config.task_file or (Path(memory_dir) / "tasks.md")
     store = TaskStore(task_file, memory_dir=memory_dir)
+
     try:
-        result = store.set_done(project_id, task_id, done)
+        # done toggle
+        if isinstance(done, bool):
+            result = store.set_done(project_id, task_id, done)
+        # title/reason edit
+        elif title is not None or reason is not None:
+            result = store.update_task(project_id, task_id, title=title, reason=reason)
+        else:
+            return {
+                "type": "response",
+                "id": request_id,
+                "status": "error",
+                "error": "done, title, reason 중 하나 이상 필요합니다",
+            }
     except (TaskValidationError, ValueError) as exc:
         return {
             "type": "response",
@@ -270,7 +278,7 @@ def _update_task(
             "status": "error",
             "error": str(exc),
         }
-    except Exception as exc:  # 방어적 — 어떤 실패든 JSONL로 반환
+    except Exception as exc:
         return {
             "type": "response",
             "id": request_id,
