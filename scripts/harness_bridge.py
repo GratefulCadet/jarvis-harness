@@ -54,6 +54,12 @@ from harness.tools.project_workspaces import (
 )
 from harness.tools.task_store import TaskStore, TaskValidationError
 from harness.tools.workspace import WorkspaceManager, default_registry_file
+from harness.tools.workspace_roots import (
+    WorkspaceRootError,
+    WorkspaceRoots,
+    default_workspace_roots_file,
+    resolve_effective_roots,
+)
 
 DEFAULT_PROJECT = "jarvis-app"
 DEFAULT_SCRATCH = PROJECT_ROOT / "data" / "electron_scratch"
@@ -344,6 +350,18 @@ def _discovery(client: HarnessClient) -> Discovery:
     )
 
 
+def _workspace_roots_manager(client: HarnessClient) -> WorkspaceRoots | None:
+    if client.config.memory_dir is None:
+        return None
+    try:
+        return WorkspaceRoots(
+            default_workspace_roots_file(Path(client.config.memory_dir)),
+            memory_dir=Path(client.config.memory_dir),
+        )
+    except WorkspaceRootError:
+        return None
+
+
 def _workspace(client: HarnessClient) -> WorkspaceManager | None:
     """bridge용 identity 계층 — 레지스트리는 <memory_dir>/file_refs.json (PART D)."""
     if client.config.memory_dir is None:
@@ -371,6 +389,133 @@ def _resources(client: HarnessClient) -> ProjectResources | None:
         client.config.memory_dir,
         workspace=workspace,
     )
+
+
+# ---------- WorkspaceRoots (persistent, picker UX) ----------
+
+def _list_workspace_roots(
+    client: HarnessClient, request_id: Any, _payload: dict[str, Any]
+) -> dict[str, Any]:
+    roots_mgr = _workspace_roots_manager(client)
+    if roots_mgr is None:
+        return {"type": "response", "id": request_id, "status": "error", "error": "memory_dir 미설정 — workspace_roots를 조회할 수 없습니다"}
+    try:
+        roots = roots_mgr.list_roots()
+    except Exception as exc:
+        return {"type": "response", "id": request_id, "status": "error", "error": f"{type(exc).__name__}: {exc}"}
+    return {"type": "response", "id": request_id, "status": "ok", "roots": roots, "scratch": _is_scratch_dir(client.config.memory_dir)}
+
+
+def _register_workspace_root(
+    client: HarnessClient, request_id: Any, payload: dict[str, Any]
+) -> dict[str, Any]:
+    device_path = payload.get("device_path") or payload.get("path") or payload.get("folder")
+    display_name = payload.get("display_name")
+    if not isinstance(device_path, str) or not device_path.strip():
+        return {"type": "response", "id": request_id, "status": "error", "error": "device_path(폴더 경로)가 필요합니다"}
+    roots_mgr = _workspace_roots_manager(client)
+    if roots_mgr is None:
+        return {"type": "response", "id": request_id, "status": "error", "error": "memory_dir 미설정 — workspace_roots를 등록할 수 없습니다"}
+    try:
+        result = roots_mgr.register(device_path.strip(), display_name.strip() if isinstance(display_name, str) and display_name.strip() else None)
+    except WorkspaceRootError as exc:
+        return {"type": "response", "id": request_id, "status": "error", "error": str(exc)}
+    except Exception as exc:
+        return {"type": "response", "id": request_id, "status": "error", "error": f"{type(exc).__name__}: {exc}"}
+    return {"type": "response", "id": request_id, "status": "ok", "created": result["created"], "root": result["root"], "scratch": _is_scratch_dir(client.config.memory_dir)}
+
+
+def _update_workspace_root(
+    client: HarnessClient, request_id: Any, payload: dict[str, Any]
+) -> dict[str, Any]:
+    root_id = payload.get("root_id") or payload.get("id")
+    if not isinstance(root_id, str) or not root_id.strip():
+        return {"type": "response", "id": request_id, "status": "error", "error": "root_id가 필요합니다"}
+    roots_mgr = _workspace_roots_manager(client)
+    if roots_mgr is None:
+        return {"type": "response", "id": request_id, "status": "error", "error": "memory_dir 미설정"}
+    display_name = payload.get("display_name")
+    device_path = payload.get("device_path") or payload.get("path")
+    # Only pass non-None updates
+    kwargs: dict[str, Any] = {}
+    if display_name is not None:
+        if not isinstance(display_name, str):
+            return {"type": "response", "id": request_id, "status": "error", "error": "display_name은 문자열이어야 합니다"}
+        kwargs["display_name"] = display_name
+    if device_path is not None:
+        if not isinstance(device_path, str):
+            return {"type": "response", "id": request_id, "status": "error", "error": "device_path는 문자열이어야 합니다"}
+        kwargs["device_path"] = device_path
+    if not kwargs:
+        return {"type": "response", "id": request_id, "status": "error", "error": "변경할 필드가 없습니다 (display_name 또는 device_path)"}
+    try:
+        result = roots_mgr.update(root_id.strip(), **kwargs)
+    except WorkspaceRootError as exc:
+        return {"type": "response", "id": request_id, "status": "error", "error": str(exc)}
+    except Exception as exc:
+        return {"type": "response", "id": request_id, "status": "error", "error": f"{type(exc).__name__}: {exc}"}
+    return {"type": "response", "id": request_id, "status": "ok", "root": result["root"], "updated": result["updated"], "scratch": _is_scratch_dir(client.config.memory_dir)}
+
+
+def _remove_workspace_root(
+    client: HarnessClient, request_id: Any, payload: dict[str, Any]
+) -> dict[str, Any]:
+    root_id = payload.get("root_id") or payload.get("id")
+    if not isinstance(root_id, str) or not root_id.strip():
+        return {"type": "response", "id": request_id, "status": "error", "error": "root_id가 필요합니다"}
+    roots_mgr = _workspace_roots_manager(client)
+    if roots_mgr is None:
+        return {"type": "response", "id": request_id, "status": "error", "error": "memory_dir 미설정"}
+    try:
+        result = roots_mgr.remove(root_id.strip())
+    except WorkspaceRootError as exc:
+        return {"type": "response", "id": request_id, "status": "error", "error": str(exc)}
+    except Exception as exc:
+        return {"type": "response", "id": request_id, "status": "error", "error": f"{type(exc).__name__}: {exc}"}
+    return {"type": "response", "id": request_id, "status": "ok", "removed": result["removed"], "root": result["root"], "scratch": _is_scratch_dir(client.config.memory_dir)}
+
+
+def _connect_project_workspace(
+    client: HarnessClient, request_id: Any, payload: dict[str, Any]
+) -> dict[str, Any]:
+    """One-gesture: register/reuse root + set project primary workspace (PART F)."""
+    project_id = payload.get("project_id")
+    device_path = payload.get("device_path") or payload.get("path") or payload.get("folder")
+    display_name = payload.get("display_name")
+    if not isinstance(project_id, str) or not project_id.strip():
+        return {"type": "response", "id": request_id, "status": "error", "error": "project_id가 필요합니다"}
+    if not isinstance(device_path, str) or not device_path.strip():
+        return {"type": "response", "id": request_id, "status": "error", "error": "device_path(폴더 경로)가 필요합니다"}
+    memory_dir = client.config.memory_dir
+    if memory_dir is None or not Path(memory_dir).is_dir():
+        return {"type": "response", "id": request_id, "status": "error", "error": "memory_dir 미설정"}
+    roots_mgr = _workspace_roots_manager(client)
+    if roots_mgr is None:
+        return {"type": "response", "id": request_id, "status": "error", "error": "memory_dir 미설정"}
+    try:
+        reg_result = roots_mgr.register(device_path.strip(), display_name.strip() if isinstance(display_name, str) and display_name.strip() else None)
+    except WorkspaceRootError as exc:
+        return {"type": "response", "id": request_id, "status": "error", "error": str(exc)}
+    except Exception as exc:
+        return {"type": "response", "id": request_id, "status": "error", "error": f"{type(exc).__name__}: {exc}"}
+    root_id = reg_result["root"]["id"]
+    # Now set primary workspace using Discovery's effective roots (registry now includes it)
+    try:
+        workspaces = _project_workspaces(client)
+        if workspaces is None:
+            return {"type": "response", "id": request_id, "status": "error", "error": "memory_dir 미설정 — workspace 관계를 설정할 수 없습니다"}
+        ws_result = workspaces.set_project_primary_workspace(project_id.strip(), root_id)
+    except (ProjectWorkspaceError, WorkspaceRootError) as exc:
+        return {"type": "response", "id": request_id, "status": "error", "error": str(exc)}
+    except Exception as exc:
+        return {"type": "response", "id": request_id, "status": "error", "error": f"{type(exc).__name__}: {exc}"}
+    return {
+        "type": "response", "id": request_id, "status": "ok",
+        "root": reg_result["root"], "root_created": reg_result["created"],
+        "project_id": ws_result["project_id"], "root_id": ws_result["root_id"],
+        "updated": ws_result["updated"], "workspace": ws_result["workspace"],
+        "scratch": _is_scratch_dir(memory_dir),
+    }
 
 
 def _project_workspaces(client: HarnessClient) -> ProjectWorkspaces | None:
@@ -944,6 +1089,21 @@ def handle_message(
 
         if message_type == "clear_project_workspace":
             return _clear_project_workspace(client, request_id, msg)
+
+        if message_type == "list_workspace_roots":
+            return _list_workspace_roots(client, request_id, msg)
+
+        if message_type == "register_workspace_root":
+            return _register_workspace_root(client, request_id, msg)
+
+        if message_type == "update_workspace_root":
+            return _update_workspace_root(client, request_id, msg)
+
+        if message_type == "remove_workspace_root":
+            return _remove_workspace_root(client, request_id, msg)
+
+        if message_type == "connect_project_workspace":
+            return _connect_project_workspace(client, request_id, msg)
 
         if message_type == "shutdown":
             raise SystemExit(0)

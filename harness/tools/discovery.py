@@ -4,7 +4,8 @@ import re
 from pathlib import Path
 from typing import Any
 
-from harness.tools.file_store import FileStore, parse_roots
+from harness.tools.file_store import FileStore
+# Import lazily inside methods to avoid circular import with workspace_roots.py
 from harness.tools.memory_context import MemoryContextReader
 from harness.tools.page_store import PageStore, split_frontmatter
 from harness.tools.project_workspaces import (
@@ -62,10 +63,24 @@ class Discovery:
             if pages_dir
             else (self.memory_dir / "pages" if self.memory_dir else None)
         )
+        # FileStore는 먼저 legacy만으로 초기화한 뒤, memory_dir가 있으면
+        # registry + legacy를 병합한 effective roots로 교체한다 (지연 병합).
+        from harness.tools.file_store import parse_roots as _parse  # noqa: PLC0415
+
         if isinstance(file_roots, dict) and file_roots:
-            self.files = FileStore(file_roots)
+            _legacy = dict(file_roots)
         else:
-            self.files = FileStore(parse_roots(file_roots))
+            _legacy = _parse(file_roots)  # type: ignore[assignment]
+        self.files = FileStore(_legacy)
+        # Registry 병합 — memory_dir가 있으면 persistent registry 우선
+        if self.memory_dir is not None:
+            try:
+                from harness.tools.workspace_roots import resolve_effective_roots  # noqa: PLC0415
+
+                effective = resolve_effective_roots(self.memory_dir, file_roots)
+                self.files = FileStore(effective)
+            except Exception:
+                pass
         # Workspace identity (§7·§11) — FileStore 위의 FileRef 계층. 레지스트리는
         # 파생 상태(<memory_dir>/file_refs.json); 스캔으로 재구성 가능.
         self.workspace = (
