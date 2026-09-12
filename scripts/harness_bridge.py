@@ -295,6 +295,58 @@ def _update_task(
     }
 
 
+def _delete_task(
+    client: HarnessClient,
+    request_id: Any,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """SYSTEM MAP Task Delete → canonical TaskStore deletion (deterministic, no LLM).
+
+    Destructive — semantically distinct from update_task, so it uses a dedicated
+    bridge message. Direct explicit user action (one UI confirmation) — no
+    Permission Gate round-trip. TaskStore is the single writer.
+    """
+    memory_dir = client.config.memory_dir
+    if memory_dir is None or not Path(memory_dir).is_dir():
+        return {
+            "type": "response",
+            "id": request_id,
+            "status": "error",
+            "error": "memory_dir 미설정 — JARVIS memory 경로가 없습니다",
+        }
+
+    project_id = payload.get("project_id")
+    task_id = payload.get("task_id") or payload.get("taskId") or payload.get("id")
+
+    task_file = client.config.task_file or (Path(memory_dir) / "tasks.md")
+    store = TaskStore(task_file, memory_dir=memory_dir)
+
+    try:
+        result = store.delete_task(project_id, task_id)
+    except (TaskValidationError, ValueError) as exc:
+        return {
+            "type": "response",
+            "id": request_id,
+            "status": "error",
+            "error": str(exc),
+        }
+    except Exception as exc:
+        return {
+            "type": "response",
+            "id": request_id,
+            "status": "error",
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
+    return {
+        "type": "response",
+        "id": request_id,
+        "status": "ok",
+        "task": result,
+        "scratch": _is_scratch_dir(memory_dir),
+    }
+
+
 def _create_task(
     client: HarnessClient,
     request_id: Any,
@@ -983,6 +1035,10 @@ def handle_message(
         if message_type == "update_task":
             # deterministic canonical write — TaskStore.set_done 단일 writer, 모델 호출 없음.
             return _update_task(client, request_id, msg)
+
+        if message_type == "delete_task":
+            # deterministic canonical write — destructive, dedicated message.
+            return _delete_task(client, request_id, msg)
 
         if message_type == "create_task":
             # deterministic canonical write — TaskStore가 단일 writer, 모델 호출 없음.
