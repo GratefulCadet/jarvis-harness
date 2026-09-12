@@ -1,19 +1,7 @@
-"""ResourceLink V1 — Project↔FileRef explicit semantic relationships.
+"""ResourceLink V1 — explicit semantic relationships between JARVIS entities and FileRefs.
 
-Architecture contract (JARVIS_WORKSPACE_ARCHITECTURE §12·§13) 반영:
-
-- 추론(inference)과 영속(persistence)은 다르다. 검색 유사성은 링크를 만들지
-  않는다. 링크는 명시적 사용자 행동 또는 승인된 제안만 영속화한다.
-- File identity는 항상 stable FileRef id(`f-*`)다. 경로·파일명·검색 텍스트를
-  identity로 받지 않는다(E-9).
-- locator(root_id + relative_path)는 읽을 때 FileRef에서 resolve한다 —
-  rename/move reconciliation이 성공하면 링크를 건드리지 않고도 최신 위치가
-  보인다(G).
-- V1 범위: from=project → to=file 만. Task identity가 아직 content-derived라
-  Task↔File 링크는 의도적으로 금지(M).
-
-저장소: <memory_dir>/resource_links.json — 파생 JARVIS 메타데이터.
-사용자 파일 본문은 복제하지 않는다.
+The registry is shared by Project→File and Task→File links. Files remain canonical
+on disk; this file stores only stable entity identities and relationship meaning.
 """
 
 from __future__ import annotations
@@ -33,9 +21,8 @@ LINKS_VERSION = 1
 #: PART C — 제어된 어휘. 링크가 "왜" 연결됐는지를 설명한다. 추가는 신중하게.
 RELATIONS: tuple[str, ...] = ("reference", "source", "result", "resource")
 
-#: V1 지원 타입. 저장 스키마는 일반형(from_type/to_type)이라 향후 Task↔File,
-#: Page↔File, Conversation↔Project 확장 시 재작성이 필요 없다(B).
-SUPPORTED_FROM_TYPES: tuple[str, ...] = ("project",)
+#: V1 supports explicit Project→File and Task→File relationships.
+SUPPORTED_FROM_TYPES: tuple[str, ...] = ("project", "task")
 SUPPORTED_TO_TYPES: tuple[str, ...] = ("file",)
 
 REF_PREFIX = "f-"  # workspace.FileRef 와 동일한 identity 접두어
@@ -169,8 +156,11 @@ class ResourceLinkRegistry:
     def links_for_project(self, project_id: str) -> list[ResourceLink]:
         return [l for l in self.all_links() if l.from_type == "project" and l.from_id == project_id]
 
+    def links_for_task(self, task_id: str) -> list[ResourceLink]:
+        return [l for l in self.all_links() if l.from_type == "task" and l.from_id == task_id]
+
     def links_for_file(self, file_id: str) -> list[ResourceLink]:
-        return [l for l in self.all_links() if l.to_type == "file" and l.to_id == file_id]
+        return [link for link in self.all_links() if link.to_type == "file" and link.to_id == file_id]
 
     def add(self, link: ResourceLink) -> ResourceLink:
         self.links[link.id] = link
@@ -181,10 +171,10 @@ class ResourceLinkRegistry:
 
 
 class ProjectResources:
-    """Project↔File 링크의 validation·생성·조회 facade (PART E·F·G).
+    """Shared canonical ResourceLink owner for Project→File and Task→File links.
 
-    직접 명시적 사용자 행동(deterministic write)과 AI 제안-승인 흐름 모두
-    이 단일 writer를 통과한다. 모델 호출은 없다.
+    Domain-specific methods validate canonical entities, then persist only stable
+    identities and relation meaning in the shared registry.
     """
 
     def __init__(
@@ -209,6 +199,82 @@ class ProjectResources:
         except FileNotFoundError as exc:
             raise ResourceLinkError(str(exc)) from exc
         return any(p["id"] == project_id for p in projects)
+
+    def _task_exists_for_any_project(self, task_id: str) -> bool:
+        if self.memory_dir is None:
+            return False
+        from harness.tools.task_store import TaskStore
+
+        store = TaskStore(self.memory_dir / "tasks.md", memory_dir=self.memory_dir)
+        return store.find_task(task_id) is not None
+
+    def _validate_task(self, task_id: str) -> dict[str, Any]:
+        if not isinstance(task_id, str) or not task_id.strip():
+            raise ResourceLinkError("task_id가 비어 있습니다")
+        tid = task_id.strip()
+        if not tid.startswith("t-") or "/" in tid or "\\" in tid:
+            raise ResourceLinkError("task_id는 Task identity(t-*)여야 합니다")
+        return {"id": tid}
+
+    def link_task_file(
+        self,
+        task_id: str,
+        file_id: str,
+        relation: str = "reference",
+    ) -> dict[str, Any]:
+        """명시적 Task→File 링크 생성. Task 소유 Project는 TaskStore에서 확인한다."""
+        task = self._validate_task(task_id)
+        self._validate_relation(relation, "task", "file")
+        if self.memory_dir is None:
+            raise ResourceLinkError("memory_dir 미설정 — Task를 검증할 수 없습니다")
+        if not self._task_exists_for_any_project(task["id"]):
+            raise ResourceLinkError(f"존재하지 않는 Task입니다: {task['id']}")
+        self._validate_file_ref(file_id)
+        self.registry.reload()
+        existing = self.registry.find_link("task", task["id"], "file", file_id, relation)
+        if existing is not None:
+            return {"created": False, "link": existing.to_dict()}
+        link = ResourceLink(
+            id=new_link_id(), from_type="task", from_id=task["id"],
+            to_type="file", to_id=file_id, relation=relation, created_at=_now_iso(),
+        )
+        self.registry.add(link)
+        self.registry.save()
+        return {"created": True, "link": link.to_dict()}
+
+    def list_task_resources(self, task_id: str) -> dict[str, Any]:
+        """Task identity로 연결된 FileRef를 현재 locator로 resolve해 반환한다."""
+        task = self._validate_task(task_id)
+        if not self._task_exists_for_any_project(task["id"]):
+            raise ResourceLinkError(f"존재하지 않는 Task입니다: {task['id']}")
+        if self.workspace is not None:
+            self.workspace.ensure_scanned()
+        self.registry.reload()
+        resources: list[dict[str, Any]] = []
+        for link in self.registry.links_for_task(task["id"]):
+            entry: dict[str, Any] = {
+                "link_id": link.id,
+                "relation": link.relation,
+                "created_at": link.created_at,
+                "file": {"id": link.to_id, "status": "unknown"},
+            }
+            if self.workspace is not None:
+                self.workspace.registry.reload()
+                ref = self.workspace.registry.by_id(link.to_id)
+                if ref is not None:
+                    entry["file"] = self._resolve_file(ref)
+            resources.append(entry)
+        return {"task_id": task["id"], "resources": resources}
+
+    def unlink_task_file(self, link_id: str) -> dict[str, Any]:
+        """Task→File 링크만 제거하고 원본 파일은 건드리지 않는다."""
+        self.registry.reload()
+        link = self.registry.by_id(link_id) if isinstance(link_id, str) else None
+        if link is None or link.from_type != "task" or link.to_type != "file":
+            raise ResourceLinkError(f"존재하지 않는 Task→File 링크입니다: {link_id}")
+        self.registry.remove(link.id)
+        self.registry.save()
+        return {"removed": True, "link": link.to_dict()}
 
     def _validate_file_ref(self, file_id: str) -> Any:
         """FileRef identity 검증 — 경로가 들어오면 명시적으로 거부한다(E-9)."""

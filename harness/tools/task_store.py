@@ -74,9 +74,19 @@ def _format_entry(task_id: str, title: str, reason: str) -> str:
 class TaskStore:
     """memory/tasks.md 기반 task 저장소 (reference 구현, §8.2)."""
 
-    def __init__(self, task_file: str | Path, memory_dir: str | Path) -> None:
+    def __init__(
+        self,
+        task_file: str | Path,
+        memory_dir: str | Path,
+        resource_links_file: str | Path | None = None,
+    ) -> None:
         self.task_file = Path(task_file)
         self.memory_dir = Path(memory_dir)
+        self.resource_links_file = (
+            Path(resource_links_file)
+            if resource_links_file is not None
+            else self.memory_dir / "resource_links.json"
+        )
         self._reader = MemoryContextReader(self.memory_dir)
         self._check_containment()
 
@@ -393,6 +403,15 @@ class TaskStore:
                 f"알 수 없는 task: {tid!r} (project: {project!r})"
             )
 
+        if self.resource_links_file.exists():
+            from harness.tools.resource_links import ResourceLinkRegistry
+
+            links = ResourceLinkRegistry(self.resource_links_file)
+            if links.links_for_task(tid):
+                raise TaskValidationError(
+                    f"Task에 연결된 리소스가 있습니다: {tid!r}. 삭제 전에 링크를 해제하세요"
+                )
+
         # Remove exactly one line, preserving everything else
         lines = text.split("\n")
         current: str | None = None
@@ -477,6 +496,20 @@ class TaskStore:
                 "done": done,
             })
         return entries
+
+    def find_task(self, task_id: str) -> dict[str, Any] | None:
+        """Find a canonical task by immutable ID across all project sections."""
+        if not isinstance(task_id, str) or not task_id.strip() or not self.task_file.exists():
+            return None
+        tid = task_id.strip()
+        return next(
+            (
+                entry
+                for entry in self._parse(self.task_file.read_text(encoding="utf-8"))
+                if entry["id"] == tid
+            ),
+            None,
+        )
 
     def _find_entry(
         self, text: str, project_id: str, task_id: str

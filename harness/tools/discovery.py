@@ -405,7 +405,7 @@ class Discovery:
                         self.resources.registry.reload()
                         links = self.resources.registry.links_for_file(entry["id"])
                         if links:
-                            entry["linked_projects"] = [
+                            project_links = [
                                 {
                                     "project_id": link.from_id,
                                     "relation": link.relation,
@@ -413,7 +413,22 @@ class Discovery:
                                     "match_evidence": "persisted",  # 추론 아님
                                 }
                                 for link in links
+                                if link.from_type == "project"
                             ]
+                            task_links = [
+                                {
+                                    "task_id": link.from_id,
+                                    "relation": link.relation,
+                                    "link_id": link.id,
+                                    "match_evidence": "persisted",  # 추론 아님
+                                }
+                                for link in links
+                                if link.from_type == "task"
+                            ]
+                            if project_links:
+                                entry["linked_projects"] = project_links
+                            if task_links:
+                                entry["linked_tasks"] = task_links
                     results.append(entry)
             except ValueError:
                 pass  # 루트 없음/검색어 문제 — file 도메인만 건너뜀

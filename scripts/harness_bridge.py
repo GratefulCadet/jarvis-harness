@@ -206,6 +206,7 @@ def _tree_snapshot(
                     "reason": task.get("reason", ""),
                     "status": "done" if task.get("done") else "open",
                     "parent_id": project_id,
+                    "children": _task_resources_children(client, task["id"]),
                 } for task in tasks],
                 # PROJECTS의 semantic projection — persisted ResourceLink만
                 # 보인다. 검색 유사성으로 자동 링크를 만들지 않는다(PART H·L).
@@ -618,15 +619,113 @@ def _project_workspace_children(
     }]
 
 
+def _task_resources_children(
+    client: HarnessClient,
+    task_id: str,
+) -> list[dict[str, Any]]:
+    """tree_snapshot용 Task→File semantic projection."""
+    resources = _resources(client)
+    if resources is None:
+        return []
+    try:
+        result = resources.list_task_resources(task_id)
+    except ResourceLinkError:
+        return []
+    by_relation: dict[str, list[dict[str, Any]]] = {}
+    for resource in result["resources"]:
+        by_relation.setdefault(resource["relation"], []).append(resource)
+    groups: list[dict[str, Any]] = []
+    for relation in sorted(by_relation):
+        groups.append({
+            "id": f"task-resources:{task_id}:{relation}",
+            "type": "task_resource_group",
+            "title": relation_label(relation),
+            "status": "active",
+            "children": [
+                {
+                    "id": f"task-resource:{resource['file']['id']}",
+                    "type": "task_resource",
+                    "title": resource["file"].get("name") or resource["file"]["id"],
+                    "status": resource["file"].get("status", "ok"),
+                    "file": resource["file"],
+                    "link_id": resource["link_id"],
+                }
+                for resource in sorted(
+                    by_relation[relation],
+                    key=lambda item: item["file"].get("name", ""),
+                )
+            ],
+        })
+    return groups
+
+
+def _link_task_file(
+    client: HarnessClient,
+    request_id: Any,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    task_id = payload.get("task_id")
+    file_id = payload.get("file_id")
+    relation = payload.get("relation") or "reference"
+    if not isinstance(task_id, str) or not task_id.strip():
+        return _err(request_id, "task_id가 필요합니다")
+    if not isinstance(file_id, str) or not file_id.strip():
+        return _err(request_id, "file_id(FileRef identity)가 필요합니다")
+    if not isinstance(relation, str):
+        return _err(request_id, "relation은 문자열이어야 합니다")
+    resources = _resources(client)
+    if resources is None:
+        return _err(request_id, "승인된 파일 루트가 없어 링크를 생성할 수 없습니다")
+    try:
+        result = resources.link_task_file(task_id.strip(), file_id.strip(), relation.strip())
+    except ResourceLinkError as exc:
+        return _err(request_id, str(exc))
+    except Exception as exc:
+        return _err(request_id, f"{type(exc).__name__}: {exc}")
+    return _ok(request_id, client, created=result["created"], link=result["link"])
+
+
+def _list_task_resources(
+    client: HarnessClient,
+    request_id: Any,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    task_id = payload.get("task_id")
+    if not isinstance(task_id, str) or not task_id.strip():
+        return _err(request_id, "task_id가 필요합니다")
+    resources = _resources(client)
+    if resources is None:
+        return _err(request_id, "승인된 파일 루트가 없어 리소스를 조회할 수 없습니다")
+    try:
+        result = resources.list_task_resources(task_id.strip())
+    except ResourceLinkError as exc:
+        return _err(request_id, str(exc))
+    return _ok(request_id, client, task_id=result["task_id"], resources=result["resources"])
+
+
+def _unlink_task_file(
+    client: HarnessClient,
+    request_id: Any,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    link_id = payload.get("link_id")
+    if not isinstance(link_id, str) or not link_id.strip():
+        return _err(request_id, "link_id가 필요합니다")
+    resources = _resources(client)
+    if resources is None:
+        return _err(request_id, "승인된 파일 루트가 없어 링크를 제거할 수 없습니다")
+    try:
+        result = resources.unlink_task_file(link_id.strip())
+    except ResourceLinkError as exc:
+        return _err(request_id, str(exc))
+    return _ok(request_id, client, removed=result["removed"], link=result["link"])
+
+
 def _project_resources_children(
     client: HarnessClient,
     project_id: str,
 ) -> list[dict[str, Any]]:
-    """tree_snapshot용 — 프로젝트의 Resource 링크를 relation 그룹 노드로 변환.
-
-    ResourceLink는 FileRef identity만 저장하므로 현재 locator는 읽을 때
-    resolve한다 — rename/move reconciliation 결과가 링크 재작성 없이 반영된다(G).
-    """
+    """tree_snapshot용 — 프로젝트의 Resource 링크를 relation 그룹 노드로 변환."""
     resources = _resources(client)
     if resources is None:
         return []
@@ -634,36 +733,34 @@ def _project_resources_children(
         result = resources.list_project_resources(project_id)
     except ResourceLinkError:
         return []
-    if not result["resources"]:
-        return []
-
     by_relation: dict[str, list[dict[str, Any]]] = {}
-    for res in result["resources"]:
-        by_relation.setdefault(res["relation"], []).append(res)
-
-    children: list[dict[str, Any]] = []
-    for relation in sorted(by_relation):
-        children.append({
+    for resource in result["resources"]:
+        by_relation.setdefault(resource["relation"], []).append(resource)
+    return [
+        {
             "id": f"resources:{project_id}:{relation}",
             "type": "resource_group",
             "title": relation_label(relation),
             "status": "active",
             "children": [
                 {
-                    # id는 stable FileRef identity — path가 아니다(PART H).
-                    "id": f"resfile:{res['file']['id']}",
+                    "id": f"resfile:{resource['file']['id']}",
                     "type": "project_resource",
-                    "title": res["file"].get("name") or res["file"]["id"],
-                    "status": res["file"].get("status", "ok"),
-                    "file": res["file"],
-                    "link_id": res["link_id"],
+                    "title": resource["file"].get("name") or resource["file"]["id"],
+                    "status": resource["file"].get("status", "ok"),
+                    "file": resource["file"],
+                    "link_id": resource["link_id"],
                 }
-                for res in sorted(
-                    by_relation[relation], key=lambda r: r["file"].get("name", "")
+                for resource in sorted(
+                    by_relation[relation],
+                    key=lambda item: item["file"].get("name", ""),
                 )
             ],
-        })
-    return children
+        }
+        for relation in sorted(by_relation)
+    ]
+
+
 
 
 def _discover_projects(
@@ -1063,6 +1160,16 @@ def handle_message(
         if message_type == "link_project_file":
             # deterministic canonical write — 명시적 사용자 구조 행동(PART F). 모델 호출 없음.
             return _link_project_file(client, request_id, msg)
+
+        if message_type == "link_task_file":
+            return _link_task_file(client, request_id, msg)
+
+        if message_type == "list_task_resources":
+            return _list_task_resources(client, request_id, msg)
+
+        if message_type == "unlink_task_file":
+            return _unlink_task_file(client, request_id, msg)
+
 
         if message_type == "list_project_resources":
             # read-only — 프로젝트 리소스 + 현재 locator resolve. 모델 호출 없음.
