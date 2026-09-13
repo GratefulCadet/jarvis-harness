@@ -94,6 +94,43 @@ class TaskFileLinkTests(unittest.TestCase):
             self.assertEqual(updated["id"], "t-task11111111")
             self.assertEqual(discovery.resources.list_task_resources("t-task11111111")["resources"][0]["file"]["id"], fid)
 
+    def test_file_move_keeps_link_file_id_and_new_locator(self) -> None:
+        """Same-root move must reconcile the existing FileRef, not create a second one."""
+        with tempfile.TemporaryDirectory() as raw:
+            fixture = build_fixture(Path(raw))
+            discovery = make_discovery(fixture)
+            task_id = "t-task11111111"
+            old_path = fixture["workspace"] / "a" / "result.csv"
+            new_path = fixture["workspace"] / "b" / "result.csv"
+            old_path.parent.mkdir()
+            old_path.write_text("lpips result\n", encoding="utf-8")
+            fid = file_id(discovery, "a/result.csv")
+            created = discovery.resources.link_task_file(task_id, fid, "result")
+            link_id = created["link"]["id"]
+
+            new_path.parent.mkdir()
+            old_path.rename(new_path)
+            report = discovery.workspace.scan_root("research")
+
+            self.assertEqual(report["created"], 0)
+            self.assertEqual(report["renamed"], [{"id": fid, "from": "a/result.csv", "to": "b/result.csv"}])
+            self.assertEqual(
+                discovery.workspace.registry.by_path("research", "b/result.csv").id,
+                fid,
+            )
+            self.assertIsNone(discovery.workspace.registry.by_path("research", "a/result.csv"))
+
+            resources = discovery.resources.list_task_resources(task_id)["resources"]
+            self.assertEqual(len(resources), 1)
+            self.assertEqual(resources[0]["link_id"], link_id)
+            self.assertEqual(resources[0]["file"]["id"], fid)
+            self.assertEqual(resources[0]["file"]["relative_path"], "b/result.csv")
+            self.assertEqual(len(discovery.resources.registry.all_links()), 1)
+            self.assertEqual(
+                len([ref for ref in discovery.workspace.registry.refs.values() if ref.root_id == "research" and not ref.missing]),
+                3,
+            )
+
     def test_file_rename_keeps_link_and_file_id(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             fixture = build_fixture(Path(raw))
