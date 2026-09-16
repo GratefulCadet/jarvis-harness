@@ -2,7 +2,12 @@
 .freebuff/
 
 # Agent config (personal autorun defaults)
-.agents/
+.agents/*
+!.agents/skills/
+.agents/skills/*
+!.agents/skills/autorun/
+.agents/skills/autorun/*
+!.agents/skills/autorun/SKILL.md
 
 # Local data & traces (may contain PII) — never commit
 data/

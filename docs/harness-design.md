@@ -5,6 +5,7 @@
 - **갱신**: 2026-09-04 — v4.7: 대화형 데모 `scripts/create_task_demo.py` + 실 앱 수직 슬라이스(`tools/harness_bridge.py`·`run_text_turn` 훅, 폴백 유지)
 - **표기 규칙**: `[사실]` 확인된 사실 · `[제안]` 설계 제안 · `[미결정]` 아직 결정하지 않은 사항
 - **이 문서의 범위**: Harness Engineering 설계만. 이번 단계에서는 runtime 구현·패키지 설치·모델 다운로드·학습을 수행하지 않는다.
+- **문서 상태 주의**: 이 파일은 2026-09-04에 작성된 Harness 설계·구현 이력 스냅샷이다. 현재 JARVIS V4 제품 상호작용의 binding contract는 저장소 루트의 `JARVIS_V4_PRODUCT_DIRECTION.md`이며, 이 문서의 과거 UI·로드맵·다음 slice 표기는 현재 제품 방향이나 자동 진행 지시가 아니다.
 
 ---
 
