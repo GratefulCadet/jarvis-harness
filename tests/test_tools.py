@@ -594,6 +594,40 @@ class ClientToolWiringTests(unittest.TestCase):
             self.assertNotIn("다음 행동을 추천받으세요", response.content)
             self.assertIn("내부적으로 찾아 연결합니다", response.content)
 
+    def test_response_grounding_rejects_semantic_project_id_requirements(self) -> None:
+        registry = registry_with_memory(Path(tempfile.mkdtemp()))
+        ordinary = [{"role": "user", "content": "JARVIS에 할 일을 추가하려면 어떤 정보가 필요해?"}]
+        for content in (
+            "프로젝트 ID가 필요합니다.",
+            "프로젝트 고유 식별자를 입력해야 합니다.",
+            "프로젝트 ID를 모르면 목록 조회로 확인하세요.",
+        ):
+            grounded = ground_final_response(content, ordinary, registry)
+            self.assertIn("project_hint", grounded)
+            self.assertNotIn(content, grounded)
+
+    def test_response_grounding_allows_human_project_identification(self) -> None:
+        registry = registry_with_memory(Path(tempfile.mkdtemp()))
+        ordinary = [{"role": "user", "content": "JARVIS에 할 일을 추가하려면?"}]
+        for content in (
+            "프로젝트 이름을 알려주세요.",
+            "어떤 프로젝트인지 설명해 주세요.",
+            '{"project_hint":"JARVIS","tasks":[{"title":"정리","reason":"인수인계"}]}',
+        ):
+            grounded = ground_final_response(content, ordinary, registry)
+            self.assertTrue(grounded.startswith(content))
+            self.assertNotIn("현재 JARVIS는 프로젝트, 작업, 관련 문맥을 내부적으로", grounded)
+
+    def test_response_grounding_rejects_unsupported_capability_claim(self) -> None:
+        registry = registry_with_memory(Path(tempfile.mkdtemp()))
+        ordinary = [{"role": "user", "content": "현재 상태를 알려줘"}]
+        grounded = ground_final_response(
+            "priority 필드로 저장하고 다음 행동 자동 추천 기능을 사용할 수 있습니다.",
+            ordinary,
+            registry,
+        )
+        self.assertIn("project_hint", grounded)
+
     def test_response_grounding_preserves_explicit_debug_terminology(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             registry = registry_with_memory(Path(temp))

@@ -20,6 +20,18 @@ def _is_internal_question(messages: Sequence[dict[str, Any]]) -> bool:
     )
 
 
+def _requires_internal_project_id(text: str) -> bool:
+    """Reject ordinary answers that make JARVIS's internal project identity user input."""
+    sentences = re.split(r"[.!?。！？\n]+", text.lower())
+    identity = re.compile(
+        r"(?:프로젝트\s*(?:id|아이디)|project[_ ]?id|내부\s*식별자|고유\s*식별자)"
+    )
+    requirement = re.compile(
+        r"(?:필요|필수|입력|제공|알려|전달|요구|물어|확인|모르면|기억나지)"
+    )
+    return any(identity.search(sentence) and requirement.search(sentence) for sentence in sentences)
+
+
 def _grounded_fallback(registry: ToolRegistry) -> str:
     """Safe ordinary-user summary when the model leaks implementation workflow."""
     create_tool = registry.get("create_task")
@@ -82,6 +94,10 @@ def ground_final_response(
             "추천받으세요", "사용하세요", "실행하세요", "사용해",
         )
     )
+    leaked = leaked or _requires_internal_project_id(result)
+    leaked = leaked or bool(
+        re.search(r"(?:다음 행동|next[- ]action).*(?:기능|도구|자동).*(?:사용|가능|제공)", result, re.IGNORECASE)
+    )
     if leaked:
         return _grounded_fallback(registry)
 
@@ -90,6 +106,11 @@ def ground_final_response(
         supported = set((create_tool.schema.parameters or {}).get("properties", {}))
         candidate_keys = set(re.findall(r"[\"']([A-Za-z_][\w-]*)[\"']\s*:", result))
         unsupported = sorted(candidate_keys - supported)
+        if set(unsupported) - {"project_hint", "tasks"}:
+            return _grounded_fallback(registry)
+        mentioned_fields = set(re.findall(r"\b([A-Za-z_][\w-]*)\s*필드", result))
+        if mentioned_fields - supported:
+            return _grounded_fallback(registry)
         if unsupported:
             fields = ", ".join(sorted(supported))
             result += (
