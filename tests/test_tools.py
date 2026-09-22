@@ -472,6 +472,31 @@ class _ScriptedFakeAdapter:
 
 
 class ClientToolWiringTests(unittest.TestCase):
+    def test_primary_grounding_path_preserves_clean_model_answer(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            config = HarnessConfig(
+                runtime="mock",
+                trace_dir=Path(temp) / "traces",
+                memory_dir=make_memory_dir(Path(temp)),
+            )
+            adapter = _ScriptedFakeAdapter([
+                ChatResponse(
+                    content=(
+                        "현재 프로젝트는 로컬 우선 개인 AI 비서입니다. "
+                        "사용자가 프로젝트 이름을 말하면 JARVIS가 내부적으로 연결하고, "
+                        "외부 handoff에는 title과 reason을 사용하면 됩니다."
+                    )
+                )
+            ])
+            client = HarnessClient(config, adapter=adapter)
+            response = client.chat_with_tools([
+                {"role": "user", "content": "현재 시스템을 자연스럽게 설명해줘"}
+            ])
+            self.assertEqual(
+                response.content,
+                "현재 프로젝트는 로컬 우선 개인 AI 비서입니다. 사용자가 프로젝트 이름을 말하면 JARVIS가 내부적으로 연결하고, 외부 handoff에는 title과 reason을 사용하면 됩니다.",
+            )
+
     def test_client_default_chat_exposes_only_executable_tools(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             config = HarnessConfig(

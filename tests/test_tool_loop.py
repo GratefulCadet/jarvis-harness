@@ -111,7 +111,7 @@ class ToolLoopExecuteTests(unittest.TestCase):
             # 2번째 요청에 assistant(tool_calls) echo + role=tool 결과가 되돌려짐
             second = adapter.requests[1]
             roles = [message["role"] for message in second.messages]
-            self.assertEqual(roles, ["system", "user", "assistant", "tool"])
+            self.assertEqual(roles, ["system", "user", "assistant", "tool", "user"])
             assistant = second.messages[2]
             self.assertEqual(assistant["tool_calls"][0]["name"], "get_project_context")
             tool_message = second.messages[3]

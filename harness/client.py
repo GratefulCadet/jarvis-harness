@@ -19,6 +19,15 @@ from harness.trace import TraceRecorder
 from harness.response_grounding import ground_final_response
 
 
+_FINAL_RESPONSE_GROUNDING = (
+    "The internal reads above are complete. Now answer the ordinary user directly. "
+    "Do not mention tools, function names, schemas, IDs, backticks, or invocation "
+    "steps. Summarize what you found in natural language and say that JARVIS can "
+    "resolve an existing project from its name or context. Keep any external "
+    "handoff suggestion separate from the canonical fields."
+)
+
+
 _CAPABILITY_GROUNDING = (
     "You are JARVIS, a user-facing assistant. Treat the tools supplied in this "
     "request as the complete set of executable capabilities for this turn. "
@@ -27,9 +36,19 @@ _CAPABILITY_GROUNDING = (
     "only from the supplied schemas; never invent fields. If offering a human "
     "handoff format, label it as external/interchange guidance and distinguish it "
     "from the canonical tool payload. Be honest about unavailable capabilities. "
-    "You may recommend a next action from context and reasoning, but do not claim "
-    "a tool-backed capability unless it is supplied here. Resolve projects by "
-    "human-friendly names or context internally; do not make the user memorize or "
+    "For ordinary system-analysis or capability questions, perform relevant reads "
+    "silently and report the findings in natural user-facing language. Do not "
+    "enumerate tools, quote schema descriptions, describe invocation steps, or "
+    "ask the user for internal IDs. You may recommend a next action from context "
+    "and reasoning, but do not claim a tool-backed capability unless it is supplied "
+    "here. For ordinary user answers, never output function names, tool names, "
+    "API names, schema descriptions, backticks, or a step-by-step invocation "
+    "recipe. Say what JARVIS found or can do in natural language. If a project "
+    "is needed, resolve it from the user's name or context internally rather than "
+    "asking for its ID. Before sending an ordinary answer, self-check it: if it "
+    "contains a private function identifier, backticks, an invocation verb, or "
+    "asks for an ID, rewrite that sentence as a result or natural capability "
+    "statement. Resolve projects by "
     "provide internal IDs. Mention tool names only "
     "when the user explicitly asks about internals, APIs, or debugging. Do not "
     "wrap the user-facing answer in analysis or other internal XML tags."
@@ -277,6 +296,12 @@ class HarnessClient:
                     working, response.tool_calls, tool_results,
                     approve_write=approve_write,
                 )
+
+                if not blocked:
+                    working.append({
+                        "role": "user",
+                        "content": _FINAL_RESPONSE_GROUNDING,
+                    })
 
                 if blocked:
                     names = ", ".join(call.name for call in blocked)
