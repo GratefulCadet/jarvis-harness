@@ -532,6 +532,15 @@ class WorkspaceManager:
         if target.suffix.lower() not in TEXT_EXTENSIONS:
             raise FileStoreError(f"편집할 수 없는 파일 형식입니다: {target.suffix or '(확장자 없음)'}")
 
+        try:
+            target.read_bytes().decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise FileStoreError(
+                "UTF-8로 해석할 수 없는 파일은 편집할 수 없습니다"
+            ) from exc
+        except OSError as exc:
+            raise FileStoreError(f"파일을 읽을 수 없습니다: {exc}") from exc
+
         current_revision = {
             "size": target.stat().st_size,
             "mtime": target.stat().st_mtime,

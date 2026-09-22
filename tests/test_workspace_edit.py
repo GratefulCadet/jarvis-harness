@@ -22,6 +22,8 @@ class WorkspaceEditTests(unittest.TestCase):
         self.file = self.root / "README.md"
         self.file.write_text("hello\n", encoding="utf-8")
         (self.root / "image.bin").write_bytes(b"\x00\x01")
+        self.undecodable = self.root / "legacy.md"
+        self.undecodable.write_bytes(b"legacy:\xff\xfe\n")
         self.discovery = Discovery(self.memory, file_roots={"scratch": str(self.root)})
         self.workspace = WorkspaceManager(self.discovery.files, default_registry_file(self.memory))
         self.workspace.scan_root("scratch")
@@ -62,6 +64,22 @@ class WorkspaceEditTests(unittest.TestCase):
                 "scratch", opened["id"], "README.md", "x" * (1024 * 1024 + 1), opened["revision"]
             )
 
+    def test_undecodable_utf8_is_read_only_and_never_rewritten(self) -> None:
+        with self.assertRaises(FileStoreError):
+            self.workspace.read_text("scratch", "legacy.md")
+
+        ref = self.workspace.file_identity("scratch", "legacy.md")
+        before = self.undecodable.read_bytes()
+        revision = {
+            "size": len(before),
+            "fingerprint": self.workspace.registry.by_id(ref["id"]).fingerprint,
+        }
+        with self.assertRaises(FileStoreError):
+            self.workspace.update_text(
+                "scratch", ref["id"], "legacy.md", "safe utf8\n", revision
+            )
+        self.assertEqual(self.undecodable.read_bytes(), before)
+
     def test_identity_path_and_type_are_authoritative(self) -> None:
         opened = self.workspace.read_text("scratch", "README.md")
         with self.assertRaises(FileStoreError):
@@ -83,6 +101,8 @@ class WorkspaceEditTests(unittest.TestCase):
         session = BridgeSession()
         opened = handle_message(client, session, {"type": "file_read", "id": 1, "root": "scratch", "path": "README.md"})
         self.assertEqual(opened["status"], "ok")
+        rejected = handle_message(client, session, {"type": "file_read", "id": 3, "root": "scratch", "path": "legacy.md"})
+        self.assertEqual(rejected["status"], "error")
         saved = handle_message(client, session, {
             "type": "file_write", "id": 2, "root_id": "scratch", "file_id": opened["file_id"],
             "path": "README.md", "content": "bridge edit\n", "revision": opened["revision"],

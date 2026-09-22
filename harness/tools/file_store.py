@@ -273,7 +273,11 @@ class FileStore:
             )
         limit = max(1, min(int(max_chars or DEFAULT_READ_CHARS), MAX_READ_CHARS_CAP))
         try:
-            content = target.read_text(encoding="utf-8", errors="replace")
+            content = target.read_text(encoding="utf-8")
+        except UnicodeDecodeError as exc:
+            raise FileStoreError(
+                f"UTF-8로 해석할 수 없는 파일은 편집할 수 없습니다: {path!r}"
+            ) from exc
         except OSError as exc:
             raise FileStoreError(f"파일을 읽을 수 없습니다: {exc}") from exc
         truncated = len(content) > limit
