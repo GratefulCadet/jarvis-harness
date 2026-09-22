@@ -507,8 +507,66 @@ class ClientToolWiringTests(unittest.TestCase):
                 {"role": "user", "content": "현재 상태를 알려줘"}
             ])
             self.assertNotIn("list_projects", response.content)
-            self.assertIn("priority 같은 추가 항목은 JARVIS Task 필드가 아닙니다", response.content)
+            self.assertNotIn("priority", response.content)
+            self.assertIn("project_hint", response.content)
             self.assertIn("project_id, reason, title", response.content)
+
+    def test_exact_korean_regression_contract_uses_grounded_fallback(self) -> None:
+        prompt = (
+            "현재 내가 해야 할 일을 다른 LLM으로부터 받아서, 구조화하고 싶어. "
+            "네 시스템이 현재 어떻게 구성되어있는지 분석한 다음, "
+            "해당 분석을 활용해서 ChatGPT에게 어떻게 전달하면 될지, "
+            "너의 시스템에 task 등을 추가하기에 어떤 형태가 적절한지 분석해서 알려줘."
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            config = HarnessConfig(
+                runtime="mock",
+                trace_dir=Path(temp) / "traces",
+                memory_dir=make_memory_dir(Path(temp)),
+            )
+            adapter = _ScriptedFakeAdapter([
+                ChatResponse(
+                    content=(
+                        "list_projects로 확인하세요. get_project_context로 읽으세요. "
+                        "priority를 사용하고 propose_next_action을 호출하세요. "
+                        "프로젝트 ID를 물어보세요."
+                    )
+                )
+            ])
+            client = HarnessClient(config, adapter=adapter)
+            response = client.chat_with_tools([{"role": "user", "content": prompt}])
+            for leaked in ("list_projects", "get_project_context", "create_task", "propose_next_action"):
+                self.assertNotIn(leaked, response.content)
+            self.assertNotIn("priority", response.content)
+            self.assertIn("project_hint", response.content)
+            self.assertIn("project_id, reason, title", response.content)
+            self.assertIn("내부적으로 찾아 연결", response.content)
+
+    def test_client_hides_translated_actions_and_project_id_requests(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            config = HarnessConfig(
+                runtime="mock",
+                trace_dir=Path(temp) / "traces",
+                memory_dir=make_memory_dir(Path(temp)),
+            )
+            adapter = _ScriptedFakeAdapter([
+                ChatResponse(
+                    content=(
+                        "현재 등록된 모든 프로젝트를 나열한다 (id, 제목, task 수)로 확인하세요. "
+                        "프로젝트 ID를 물어보는 것이 좋습니다. "
+                        "propose_next_action을 사용해 다음 행동을 추천받으세요."
+                    )
+                )
+            ])
+            client = HarnessClient(config, adapter=adapter)
+            response = client.chat_with_tools([
+                {"role": "user", "content": "현재 시스템을 분석해줘"}
+            ])
+            self.assertNotIn("현재 등록된 모든 프로젝트를 나열한다", response.content)
+            self.assertNotIn("프로젝트 ID를 물어", response.content)
+            self.assertNotIn("propose_next_action", response.content)
+            self.assertNotIn("다음 행동을 추천받으세요", response.content)
+            self.assertIn("내부적으로 찾아 연결합니다", response.content)
 
     def test_client_exposes_registry_and_executes_tool(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
