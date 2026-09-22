@@ -43,6 +43,13 @@ def build_create_task_tool(
     # 생성 시점에 위치 제약(task_file ⊆ memory_dir)을 검증해 설정 오류를 빨리 드러낸다
     store = TaskStore(resolved_task, memory_dir=resolved_memory)
 
+    def preflight(arguments: dict[str, Any]) -> None:
+        store.validate_create(
+            arguments["project_id"],
+            arguments.get("title"),
+            arguments.get("reason"),
+        )
+
     def handler(arguments: dict[str, Any]) -> dict[str, Any]:
         return store.create(
             arguments["project_id"],
@@ -50,4 +57,4 @@ def build_create_task_tool(
             arguments.get("reason"),
         )
 
-    return Tool(schema=schema, kind="write", handler=handler)
+    return Tool(schema=schema, kind="write", handler=handler, preflight=preflight)

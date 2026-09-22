@@ -14,6 +14,7 @@ Harness는 schema 검증과 권한 검사만 담당한다. 이 모듈의 Tool.ha
 """
 
 ToolKind = Literal["read", "write"]
+Preflight = Callable[[dict[str, Any]], None]
 
 _TYPE_CHECKS: dict[str, Callable[[Any], bool]] = {
     "string": lambda value: isinstance(value, str),
@@ -65,6 +66,8 @@ class Tool:
     schema: ToolSchema
     kind: ToolKind = "read"
     handler: Callable[[dict[str, Any]], dict[str, Any]] | None = None
+    # Permission Gate 전에 수행하는 side-effect-free domain validation (선택)
+    preflight: Preflight | None = None
     # handler 미등록 상태에서 반환할 안내 문구 (선택)
     unavailable_hint: str | None = None
 
@@ -138,6 +141,16 @@ class ToolRegistry:
                 ok=False,
                 error="인자 검증 실패: " + "; ".join(errors),
             )
+
+        if tool.preflight is not None:
+            try:
+                tool.preflight(dict(arguments))
+            except Exception as exc:
+                return ToolResult(
+                    tool_call_id=name,
+                    ok=False,
+                    error=f"사전 검증 실패: {exc}",
+                )
 
         if tool.kind == "write" and not approve_write:
             # §8.3-2 Permission Gate — confirm 없이는 실행하지 않는다.

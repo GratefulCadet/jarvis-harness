@@ -186,6 +186,38 @@ class ToolLoopErrorFeedbackTests(unittest.TestCase):
             payload = json.loads(tool_message["content"])
             self.assertIn("알 수 없는 tool", payload["error"])
 
+    def test_invalid_create_task_can_be_repaired_before_permission(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            invalid = ToolCall(
+                name="create_task",
+                arguments={
+                    "project_id": "current_project_id",
+                    "title": "repair me",
+                },
+            )
+            corrected = ToolCall(
+                name="create_task",
+                arguments={
+                    "project_id": "local-jarvis",
+                    "title": "repair me",
+                },
+            )
+            client, adapter = make_client(Path(temp), [
+                ChatResponse(content="", tool_calls=[invalid]),
+                ChatResponse(content="", tool_calls=[corrected]),
+            ])
+            response = client.chat_with_tools(list(USER_MSG))
+
+            self.assertEqual(response.finish_reason, "awaiting_confirmation")
+            self.assertEqual(response.tool_calls, [corrected])
+            self.assertEqual(len(adapter.requests), 2)
+            first_result = next(
+                message for message in adapter.requests[1].messages
+                if message["role"] == "tool"
+            )
+            self.assertIn("알 수 없는 프로젝트", first_result["content"])
+            self.assertFalse((Path(temp) / "memory" / "tasks.md").exists())
+
 
 class WriteGateLoopTests(unittest.TestCase):
     def _client_with_write_handler(

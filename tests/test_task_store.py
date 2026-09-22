@@ -208,6 +208,53 @@ class TaskStoreTests(unittest.TestCase):
 
 
 class CreateTaskConfirmationFlowTests(unittest.TestCase):
+    def test_unknown_project_is_rejected_before_permission(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            proposed = create_task_call(project="current_project_id")
+            client, adapter = make_client(
+                Path(temp),
+                [ChatResponse(content="프로젝트를 확인하겠습니다.")],
+            )
+            response = client.chat_with_tools(
+                list(USER_MSG), confirmed_calls=[proposed]
+            )
+
+            self.assertEqual(response.finish_reason, "stop")
+            self.assertFalse(response.tool_calls)
+            self.assertFalse(tasks_file(Path(temp)).exists())
+            payload = json.loads(
+                next(m for m in adapter.requests[0].messages if m["role"] == "tool")["content"]
+            )
+            self.assertFalse(payload["ok"])
+            self.assertIn("알 수 없는 프로젝트", payload["error"])
+
+    def test_invalid_project_and_text_inputs_fail_before_permission(self) -> None:
+        cases = [
+            {"project_id": "prj_123", "title": "valid"},
+            {"project_id": "../jarvis-app", "title": "valid"},
+            {"project_id": "local-jarvis", "title": "   "},
+            {"project_id": "local-jarvis", "title": "valid", "reason": "bad\nreason"},
+        ]
+        for arguments in cases:
+            with self.subTest(arguments=arguments), tempfile.TemporaryDirectory() as temp:
+                client, adapter = make_client(
+                    Path(temp),
+                    [ChatResponse(content="입력을 확인하겠습니다.")],
+                )
+                response = client.chat_with_tools(
+                    list(USER_MSG),
+                    confirmed_calls=[ToolCall(name="create_task", arguments=arguments)],
+                )
+
+                self.assertEqual(response.finish_reason, "stop")
+                self.assertFalse(response.tool_calls)
+                self.assertFalse(tasks_file(Path(temp)).exists())
+                payload = json.loads(
+                    next(m for m in adapter.requests[0].messages if m["role"] == "tool")["content"]
+                )
+                self.assertFalse(payload["ok"])
+                self.assertIn("사전 검증 실패", payload["error"])
+
     def test_proposed_create_task_awaits_confirmation_with_zero_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             proposed = create_task_call()

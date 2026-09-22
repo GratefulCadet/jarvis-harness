@@ -216,6 +216,50 @@ class RegistryGateTests(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertEqual(len(called), 1)
 
+    def test_preflight_rejects_before_permission_and_handler(self) -> None:
+        registry = ToolRegistry()
+        events = []
+
+        def preflight(arguments):
+            events.append("preflight")
+            raise ValueError("unknown project")
+
+        def handler(arguments):
+            events.append("handler")
+            return {"created": True}
+
+        registry.register(
+            Tool(
+                schema=create_task_schema_fn(),
+                kind="write",
+                handler=handler,
+                preflight=preflight,
+            )
+        )
+        result = registry.execute(
+            "create_task", {"project_id": "p", "title": "t"}
+        )
+        self.assertFalse(result.ok)
+        self.assertFalse(result.requires_confirmation)
+        self.assertIn("사전 검증 실패", result.error)
+        self.assertEqual(events, ["preflight"])
+
+    def test_tool_without_preflight_keeps_permission_behavior(self) -> None:
+        registry = ToolRegistry()
+        called = []
+        registry.register(
+            Tool(
+                schema=create_task_schema_fn(),
+                kind="write",
+                handler=lambda arguments: called.append(arguments) or {"ok": True},
+            )
+        )
+        result = registry.execute(
+            "create_task", {"project_id": "p", "title": "t"}
+        )
+        self.assertTrue(result.requires_confirmation)
+        self.assertEqual(called, [])
+
     def test_default_registry_exposes_expected_schemas(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             registry = registry_with_memory(Path(temp))

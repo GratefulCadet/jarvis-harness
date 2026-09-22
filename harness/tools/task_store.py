@@ -140,6 +140,18 @@ class TaskStore:
 
     # ---------- 생성 ----------
 
+    def validate_create(
+        self,
+        project_id: Any,
+        title: Any,
+        reason: Any = None,
+    ) -> tuple[str, str, str]:
+        """Validate create inputs without IDs, duplicate handling, or file writes."""
+        project = self._check_project_id(project_id)
+        checked_title = self._check_text(title, "title", _MAX_TITLE, required=True)
+        checked_reason = self._check_text(reason, "reason", _MAX_REASON, required=False)
+        return project, checked_title, checked_reason
+
     def create(
         self,
         project_id: str,
@@ -151,9 +163,7 @@ class TaskStore:
         ID는 content와 무관한 불변 ID (UUID 기반)로 생성된다.
         중복 감지는 title+reason 정규화 기반으로 ID 생성과 분리된다.
         """
-        project = self._check_project_id(project_id)
-        title = self._check_text(title, "title", _MAX_TITLE, required=True)
-        reason = self._check_text(reason, "reason", _MAX_REASON, required=False)
+        project, title, reason = self.validate_create(project_id, title, reason)
 
         # Duplicate detection: same project + same normalized title + same normalized reason
         if self.task_file.exists():
