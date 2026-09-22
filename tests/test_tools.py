@@ -8,6 +8,7 @@ from pathlib import Path
 from harness.client import HarnessClient
 from harness.config import HarnessConfig
 from harness.models import ChatRequest, ChatResponse, ToolCall
+from harness.response_grounding import ground_final_response
 from harness.tools import (
     Tool,
     ToolRegistry,
@@ -567,6 +568,19 @@ class ClientToolWiringTests(unittest.TestCase):
             self.assertNotIn("propose_next_action", response.content)
             self.assertNotIn("다음 행동을 추천받으세요", response.content)
             self.assertIn("내부적으로 찾아 연결합니다", response.content)
+
+    def test_response_grounding_preserves_explicit_debug_terminology(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            registry = registry_with_memory(Path(temp))
+            technical = "디버그를 위해 list_projects와 propose_next_action의 등록 상태를 설명해줘"
+            self.assertEqual(
+                ground_final_response(
+                    "list_projects는 등록되어 있고 propose_next_action은 handler가 없습니다.",
+                    [{"role": "user", "content": technical}],
+                    registry,
+                ),
+                "list_projects는 등록되어 있고 propose_next_action은 handler가 없습니다.",
+            )
 
     def test_client_exposes_registry_and_executes_tool(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
