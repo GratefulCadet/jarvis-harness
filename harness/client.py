@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from typing import Any, Mapping, Sequence
 
@@ -16,6 +17,88 @@ from harness.models import (
 )
 from harness.tools import Tool, ToolRegistry, build_default_registry
 from harness.trace import TraceRecorder
+
+
+_CAPABILITY_GROUNDING = (
+    "You are JARVIS, a user-facing assistant. Treat the tools supplied in this "
+    "request as the complete set of executable capabilities for this turn. "
+    "Use them internally when needed; do not instruct an ordinary user to call "
+    "implementation-level tool names. Describe current writable data structures "
+    "only from the supplied schemas; never invent fields. If offering a human "
+    "handoff format, label it as external/interchange guidance and distinguish it "
+    "from the canonical tool payload. Be honest about unavailable capabilities. "
+    "You may recommend a next action from context and reasoning, but do not claim "
+    "a tool-backed capability unless it is supplied here. Resolve projects by "
+    "human-friendly names or context internally; do not make the user memorize or "
+    "provide internal IDs. Mention tool names only "
+    "when the user explicitly asks about internals, APIs, or debugging. Do not "
+    "wrap the user-facing answer in analysis or other internal XML tags."
+)
+
+
+def _is_internal_question(messages: Sequence[dict[str, Any]]) -> bool:
+    text = " ".join(
+        str(message.get("content") or "")
+        for message in messages
+        if message.get("role") == "user"
+    ).lower()
+    return any(
+        marker in text
+        for marker in ("tool", "api", "schema", "내부", "개발자", "구현", "함수명")
+    )
+
+
+def _user_facing_content(
+    content: str,
+    messages: Sequence[dict[str, Any]],
+    registry: ToolRegistry,
+) -> str:
+    """Remove implementation vocabulary from ordinary final answers.
+
+    The replacement vocabulary is derived from the live registry rather than a
+    second capability list. Explicit API/debugging questions retain technical
+    names.
+    """
+    if _is_internal_question(messages):
+        return content
+    result = re.sub(r"</?analysis>", "", content, flags=re.IGNORECASE).strip()
+    if not result:
+        return result
+    replacements = {}
+    for schema in registry.schemas():
+        tool = registry.get(schema.name)
+        if tool is not None:
+            replacements[schema.name] = (
+                schema.description.split(".", 1)[0]
+                if schema.description
+                else "관련 기능"
+            )
+    for name, label in sorted(replacements.items(), key=lambda item: -len(item[0])):
+        result = re.sub(rf"(?<![\\w-]){re.escape(name)}(?![\\w-])", label, result)
+
+    create_tool = registry.get("create_task")
+    if create_tool is not None:
+        supported = set(
+            (create_tool.schema.parameters or {}).get("properties", {})
+        )
+        candidate_keys = set(
+            re.findall(r"[\"']([A-Za-z_][\w-]*)[\"']\s*:", result)
+        )
+        unsupported = sorted(candidate_keys - supported)
+        if unsupported:
+            names = ", ".join(unsupported)
+            fields = ", ".join(sorted(supported))
+            result += (
+                "\n\n참고: 위 JSON은 외부 handoff 예시로만 사용할 수 있습니다. "
+                f"JARVIS가 canonical Task 저장에 받는 필드는 {fields}이며, "
+                f"{names} 같은 추가 항목은 JARVIS Task 필드가 아닙니다."
+            )
+    if "project_id" in result and not _is_internal_question(messages):
+        result += (
+            "\n\n프로젝트 이름이나 작업 내용을 알려주시면 JARVIS가 기존 프로젝트를 "
+            "내부적으로 찾아 연결합니다. 사용자가 project_id를 직접 알 필요는 없습니다."
+        )
+    return result
 
 
 def _tool_message_content(result: ToolResult) -> str:
@@ -142,10 +225,14 @@ class HarnessClient:
         답변을 생성한다. 이후 모델이 새로 제안하는 write는 다시 gate에 걸린다.
         approve_write=True 재호출(모델 재판단 경로)은 호환용으로 유지한다.
         """
-        tool_schemas = list(tools) if tools is not None else self._tools.schemas()
+        tool_schemas = (
+            list(tools) if tools is not None else self._tools.available_schemas()
+        )
         limit = max_turns if max_turns is not None else self._config.tool_loop_max_turns
         limit = max(limit, 1)
         working = [dict(message) for message in messages]
+        if not any(message.get("role") == "system" for message in working):
+            working.insert(0, {"role": "system", "content": _CAPABILITY_GROUNDING})
         trace_id = self._trace.new_trace_id()
         meta = self._meta()
         loop_meta: dict[str, Any] = {"max_turns": limit, "approve_write": approve_write}
@@ -209,6 +296,9 @@ class HarnessClient:
                 turns += 1
 
                 if not response.tool_calls:
+                    response.content = _user_facing_content(
+                        response.content, working, self._tools
+                    )
                     response.trace_id = trace_id
                     latency_ms = int((time.perf_counter() - started) * 1000)
                     self._trace.record(

@@ -235,6 +235,30 @@ class RegistryGateTests(unittest.TestCase):
                 ],
             )
 
+    def test_available_schemas_exclude_schema_only_tools(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            registry = registry_with_memory(Path(temp))
+            registered = {schema.name for schema in registry.schemas()}
+            available = {schema.name for schema in registry.available_schemas()}
+            self.assertIn("propose_next_action", registered)
+            self.assertNotIn("propose_next_action", available)
+            self.assertIn("get_project_context", available)
+            self.assertIn("create_task", available)
+
+    def test_available_schemas_follow_handler_registration_dynamically(self) -> None:
+        schema = gpc_schema_fn()
+        registry = ToolRegistry()
+        registry.register(Tool(schema=schema, handler=None))
+        self.assertEqual(registry.available_schemas(), [])
+        registry.register(Tool(schema=schema, handler=lambda _: {"ok": True}))
+        self.assertEqual([item.name for item in registry.available_schemas()], [schema.name])
+
+    def test_create_task_schema_has_only_canonical_fields(self) -> None:
+        schema = create_task_schema_fn()
+        properties = schema.parameters["properties"]
+        self.assertEqual(set(properties), {"project_id", "title", "reason"})
+        self.assertNotIn("priority", properties)
+
 
 class ListCurrentTasksTests(unittest.TestCase):
     """Slice 5 — list_current_tasks read tool 검증.
@@ -447,6 +471,45 @@ class _ScriptedFakeAdapter:
 
 
 class ClientToolWiringTests(unittest.TestCase):
+    def test_client_default_chat_exposes_only_executable_tools(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            config = HarnessConfig(
+                runtime="mock",
+                trace_dir=Path(temp) / "traces",
+                memory_dir=make_memory_dir(Path(temp)),
+            )
+            adapter = _ScriptedFakeAdapter([ChatResponse(content="ok")])
+            client = HarnessClient(config, adapter=adapter)
+            client.chat_with_tools([{"role": "user", "content": "capabilities"}])
+            names = {schema.name for schema in adapter.requests[0].tools or []}
+            self.assertNotIn("propose_next_action", names)
+            self.assertIn("create_task", names)
+            self.assertIn("get_project_context", names)
+            self.assertTrue(adapter.requests[0].messages[0]["role"] == "system")
+
+    def test_client_sanitizes_ordinary_final_answer_from_tool_names_and_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            config = HarnessConfig(
+                runtime="mock",
+                trace_dir=Path(temp) / "traces",
+                memory_dir=make_memory_dir(Path(temp)),
+            )
+            adapter = _ScriptedFakeAdapter([
+                ChatResponse(
+                    content=(
+                        "list_projects로 확인하세요. "
+                        '{"project_id":"local-jarvis","title":"t","priority":3}'
+                    )
+                )
+            ])
+            client = HarnessClient(config, adapter=adapter)
+            response = client.chat_with_tools([
+                {"role": "user", "content": "현재 상태를 알려줘"}
+            ])
+            self.assertNotIn("list_projects", response.content)
+            self.assertIn("priority 같은 추가 항목은 JARVIS Task 필드가 아닙니다", response.content)
+            self.assertIn("project_id, reason, title", response.content)
+
     def test_client_exposes_registry_and_executes_tool(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             config = HarnessConfig(

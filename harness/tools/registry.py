@@ -85,7 +85,19 @@ class ToolRegistry:
         return name in self._tools
 
     def schemas(self) -> list[ToolSchema]:
+        """Return every registered schema, including diagnostic-only tools."""
         return [tool.schema for tool in self._tools.values()]
+
+    def available_schemas(self) -> list[ToolSchema]:
+        """Return only schemas whose handlers are executable right now.
+
+        Registration is useful for diagnostics and future integrations, but it is
+        not a truthful model capability boundary: a schema-only tool cannot be
+        selected successfully by the current runtime.
+        """
+        return [
+            tool.schema for tool in self._tools.values() if tool.handler is not None
+        ]
 
     def classify(self, name: str) -> ToolKind | None:
         tool = self._tools.get(name)
