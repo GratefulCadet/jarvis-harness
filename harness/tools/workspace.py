@@ -35,6 +35,7 @@ from harness.tools.file_store import (
 REF_PREFIX = "f-"
 FINGERPRINT_BYTES = 64 * 1024  # 본문 지문은 앞 64KB만 읽는다 (bounded safe read)
 FINGERPRINT_MAX_FILE = 4 * 1024 * 1024  # 4MB 초과 파일은 지문 없이 크기/mtime만
+MAX_EDIT_BYTES = 1024 * 1024
 REGISTRY_VERSION = 1
 
 
@@ -479,6 +480,85 @@ class WorkspaceManager:
             return
         for root_name in sorted(self.store.roots):
             self.scan_root(root_name)
+
+    def read_text(self, root: str | None, relative_path: str) -> dict[str, Any]:
+        """Read an approved text file with its stable identity and revision."""
+        root_name, target = self.store.resolve_path(root, relative_path)
+        self.ensure_scanned()
+        result = self.store.read_text(relative_path, root=root_name)
+        ref = self.registry.by_path(root_name, result["path"])
+        if ref is None or ref.missing or ref.unresolved:
+            raise FileStoreError("파일 identity를 확인할 수 없습니다")
+        result["id"] = ref.id
+        result["root_id"] = root_name
+        result["revision"] = {
+            "size": target.stat().st_size,
+            "mtime": target.stat().st_mtime,
+            "fingerprint": content_fingerprint(target),
+        }
+        return result
+
+    def update_text(
+        self,
+        root_id: str,
+        file_id: str,
+        relative_path: str,
+        content: str,
+        expected_revision: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        """Atomically update one existing UTF-8 text file after revision checking."""
+        if not isinstance(content, str):
+            raise FileStoreError("content는 문자열이어야 합니다")
+        if len(content.encode("utf-8")) > MAX_EDIT_BYTES:
+            raise FileStoreError(f"파일이 너무 큽니다 ({MAX_EDIT_BYTES} bytes 제한)")
+        if not isinstance(file_id, str) or not file_id.strip():
+            raise FileStoreError("file_id(FileRef identity)가 필요합니다")
+        if not isinstance(root_id, str) or not root_id.strip():
+            raise FileStoreError("root_id가 필요합니다")
+
+        self.registry.reload()
+        ref = self.registry.by_id(file_id.strip())
+        if ref is None or ref.missing or ref.unresolved:
+            raise FileStoreError("존재하지 않거나 해결되지 않은 FileRef입니다")
+        if ref.root_id != root_id.strip():
+            raise FileStoreError("FileRef가 지정한 WorkspaceRoot에 속하지 않습니다")
+        normalized = str(relative_path or "").replace("\\", "/")
+        if normalized != ref.relative_path:
+            raise FileStoreError("FileRef 경로와 요청 경로가 일치하지 않습니다")
+
+        resolved_root, target = self.store.resolve_path(ref.root_id, ref.relative_path)
+        if resolved_root != ref.root_id or not target.is_file():
+            raise FileStoreError("대상 파일을 확인할 수 없습니다")
+        if target.suffix.lower() not in TEXT_EXTENSIONS:
+            raise FileStoreError(f"편집할 수 없는 파일 형식입니다: {target.suffix or '(확장자 없음)'}")
+
+        current_revision = {
+            "size": target.stat().st_size,
+            "mtime": target.stat().st_mtime,
+            "fingerprint": content_fingerprint(target),
+        }
+        expected = expected_revision or {}
+        if (
+            expected.get("size") != current_revision["size"]
+            or expected.get("fingerprint") != current_revision["fingerprint"]
+        ):
+            raise FileStoreError("이 파일이 외부에서 변경되었습니다. Reload 후 다시 저장하세요.")
+
+        tmp = target.with_name(f".{target.name}.jarvis-save-{uuid.uuid4().hex[:8]}.tmp")
+        try:
+            tmp.write_text(content, encoding="utf-8", newline="")
+            os.replace(tmp, target)
+        except OSError as exc:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise FileStoreError(f"파일을 저장할 수 없습니다: {exc}") from exc
+
+        self.scan_root(ref.root_id)
+        updated = self.read_text(ref.root_id, ref.relative_path)
+        updated["saved"] = True
+        return updated
 
     def _paths_changed(self) -> bool:
         """현재 파일 경로 집합 != 레지스트리의 live 경로 집합인지 (metadata-only)."""

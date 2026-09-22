@@ -1070,6 +1070,55 @@ def _files_snapshot(
     }
 
 
+def _file_read(
+    client: HarnessClient,
+    request_id: Any,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    workspace = _workspace(client)
+    root = payload.get("root")
+    path = payload.get("path")
+    if workspace is None:
+        return _err(request_id, "승인된 파일 루트가 없습니다")
+    if not isinstance(path, str) or not path.strip():
+        return _err(request_id, "path가 필요합니다")
+    try:
+        result = workspace.read_text(root, path.strip())
+        result["file_id"] = result.pop("id")
+        return _ok(request_id, client, **result)
+    except Exception as exc:
+        return _err(request_id, str(exc))
+
+
+def _file_write(
+    client: HarnessClient,
+    request_id: Any,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    workspace = _workspace(client)
+    if workspace is None:
+        return _err(request_id, "승인된 파일 루트가 없습니다")
+    root_id = payload.get("root_id")
+    file_id = payload.get("file_id")
+    path = payload.get("path")
+    content = payload.get("content")
+    revision = payload.get("revision")
+    if not all(isinstance(value, str) and value.strip() for value in (root_id, file_id, path)):
+        return _err(request_id, "root_id, file_id, path가 필요합니다")
+    if not isinstance(content, str):
+        return _err(request_id, "content는 문자열이어야 합니다")
+    if revision is not None and not isinstance(revision, dict):
+        return _err(request_id, "revision은 객체여야 합니다")
+    try:
+        result = workspace.update_text(
+            root_id.strip(), file_id.strip(), path.strip(), content, revision
+        )
+        result["file_id"] = result.pop("id")
+        return _ok(request_id, client, **result)
+    except Exception as exc:
+        return _err(request_id, str(exc))
+
+
 def _pages_snapshot(
     client: HarnessClient,
     request_id: Any,
@@ -1156,6 +1205,12 @@ def handle_message(
         if message_type == "files_snapshot":
             # read-only — 승인된 루트의 파일 트리 (SYSTEM MAP FILES). 모델 호출 없음.
             return _files_snapshot(client, request_id, msg)
+
+        if message_type == "file_read":
+            return _file_read(client, request_id, msg)
+
+        if message_type == "file_write":
+            return _file_write(client, request_id, msg)
 
         if message_type == "link_project_file":
             # deterministic canonical write — 명시적 사용자 구조 행동(PART F). 모델 호출 없음.
