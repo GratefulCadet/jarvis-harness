@@ -69,6 +69,35 @@ def _tool_message_content(result: ToolResult) -> str:
     return json.dumps(payload, ensure_ascii=False)
 
 
+def _active_file_context(context: dict[str, Any] | None) -> str | None:
+    """context.active_file → 모델용 한 줄 컨텍스트.
+
+    identity locator만 표현한다. 내용은 주입하지 않는다 — 모델이 필요하면
+    기존 read 도구로 저장된 파일시스템의 현재 값을 읽는다.
+    """
+    active = (context or {}).get("active_file")
+    if not isinstance(active, dict):
+        return None
+    path = active.get("path")
+    if not isinstance(path, str) or not path.strip():
+        return None
+    line = f"The user currently has this workspace file open: {path.strip()}"
+    root_id = active.get("root_id")
+    if isinstance(root_id, str) and root_id.strip():
+        # 내부 approved-root 이름 — 모델이 read 도구의 root 인자를 추론하지 않도록 한다.
+        line += f" (approved root: {root_id.strip()})"
+    name = active.get("name")
+    if isinstance(name, str) and name.strip() and name.strip() != path.strip():
+        line += f" (display name: {name.strip()})"
+    line += (
+        " When the user refers to it (\"이 파일\", \"현재 파일\"), read the saved "
+        "file content with your file-reading capability before answering. If the "
+        "user explicitly names a different file, prefer that explicit file. If "
+        "no file is open, do not guess one."
+    )
+    return line
+
+
 class HarnessClient:
     """JARVIS가 접촉하는 유일한 LLM 접점 (§4.1).
 
@@ -187,6 +216,9 @@ class HarnessClient:
         working = [dict(message) for message in messages]
         if not any(message.get("role") == "system" for message in working):
             working.insert(0, {"role": "system", "content": _CAPABILITY_GROUNDING})
+        active_file_line = _active_file_context(context)
+        if active_file_line:
+            working.insert(1, {"role": "system", "content": active_file_line})
         trace_id = self._trace.new_trace_id()
         meta = self._meta()
         loop_meta: dict[str, Any] = {"max_turns": limit, "approve_write": approve_write}

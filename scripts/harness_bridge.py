@@ -1158,6 +1158,27 @@ class BridgeSession:
 
     def __init__(self) -> None:
         self.last_text: str | None = None
+        self.last_active_file: dict[str, str] | None = None
+
+
+def _active_file_context(msg: dict[str, Any]) -> dict[str, str] | None:
+    """chat/confirm 요청의 active_file 메타데이터를 정화한다.
+
+    렌더러가 보낸 값에서 identity locator 4개(file_id·root_id·path·name)만 남기고
+    버린다 — 내용·임의 경로는 신뢰하지 않는다. 모델 컨텍스트는 이 메타데이터만
+    받고, 내용은 항상 기존 read 도구가 저장된 파일시스템에서 현재 값으로 읽는다.
+    """
+    raw = msg.get("active_file")
+    if not isinstance(raw, dict):
+        return None
+    fields: dict[str, str] = {}
+    for key in ("file_id", "root_id", "path", "name"):
+        value = raw.get(key)
+        if isinstance(value, str) and value.strip():
+            fields[key] = value.strip()
+    if not fields.get("root_id") or not fields.get("path"):
+        return None
+    return fields
 
 
 def handle_message(
@@ -1274,9 +1295,12 @@ def handle_message(
                         "status": "error", "error": "chat 메시지의 text가 비어 있습니다",
                     }
                 session.last_text = text
+                session.last_active_file = _active_file_context(msg)
                 project_id = msg.get("project_id") or DEFAULT_PROJECT
                 messages = [{"role": "user", "content": text}]
                 extra: dict[str, Any] = {"project_id": project_id}
+                if session.last_active_file:
+                    extra["active_file"] = session.last_active_file
                 confirmed: list[Any] | None = None
             else:  # confirm
                 tool_call = msg.get("tool_call")
@@ -1290,10 +1314,19 @@ def handle_message(
                 messages = [{"role": "user", "content": text}]
                 confirmed = [tool_call]
                 extra = {"confirmed_tool": tool_call.get("name")}
+                if session.last_active_file:
+                    extra["active_file"] = session.last_active_file
+
+            context = (
+                {"active_file": extra["active_file"]}
+                if "active_file" in extra
+                else None
+            )
 
             response = client.chat_with_tools(
                 messages,
                 confirmed_calls=confirmed,
+                context=context,
                 metadata={"source": "electron_bridge", **extra},
             )
             trace = _trace_info(client.config, response.trace_id)

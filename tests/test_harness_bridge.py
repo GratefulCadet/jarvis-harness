@@ -7,8 +7,10 @@ from pathlib import Path
 
 from harness.config import HarnessConfig
 from harness.models import ChatResponse, ToolCall
+from harness.client import _active_file_context as _active_file_system_line
 from scripts.harness_bridge import (
     BridgeSession,
+    _active_file_context,
     handle_message,
     resolve_memory_dir,
     run_bridge,
@@ -92,6 +94,16 @@ class HandleMessageTests(unittest.TestCase):
 
     def _client(self, *responses: ChatResponse) -> FakeClient:
         return FakeClient(list(responses), self.memory, self.trace)
+
+    @staticmethod
+    def _client_for(*responses: ChatResponse) -> FakeClient:
+        """setUp 없이 즉석 FakeClient — ActiveFileContextTests에서 재사용."""
+        tmp = tempfile.TemporaryDirectory()
+        return FakeClient(
+            list(responses),
+            Path(tmp.name) / "memory",
+            Path(tmp.name) / "traces",
+        )
 
     def test_ping(self) -> None:
         client = self._client()
@@ -226,6 +238,114 @@ class RunBridgeProtocolTests(unittest.TestCase):
         self.assertEqual(parsed[1]["id"], 2)
         self.assertEqual(parsed[3]["tool_call"]["name"], "create_task")
         tmp.cleanup()
+
+
+class ActiveFileContextTests(unittest.TestCase):
+    """Active File 컨텍스트 경계 (V4 Active Workspace File Context).
+
+    요구사항 매핑:
+    - identity locator 4개만 남기고 정화 (renderer 임의 값 신뢰 금지)
+    - chat → chat_with_tools(context={active_file}) 전달
+    - confirm도 같은 컨텍스트 유지 (session 보존)
+    - active_file 없으면 context=None (추측 금지)
+    """
+
+    def test_sanitizer_keeps_only_identity_fields(self) -> None:
+        fields = _active_file_context({
+            "active_file": {
+                "file_id": "f-abc",
+                "root_id": "scratch-root",
+                "path": "notes/idea.md",
+                "name": "idea.md",
+                "content": "이 내용은 무시되어야 한다",
+                "absolute": "C:/tmp/notes/idea.md",
+            },
+        })
+        self.assertEqual(fields, {
+            "file_id": "f-abc",
+            "root_id": "scratch-root",
+            "path": "notes/idea.md",
+            "name": "idea.md",
+        })
+
+    def test_sanitizer_requires_root_and_path(self) -> None:
+        self.assertIsNone(_active_file_context({"active_file": {"path": "a.md"}}))
+        self.assertIsNone(_active_file_context({"active_file": "notes/idea.md"}))
+        self.assertIsNone(_active_file_context({}))
+
+    def test_chat_passes_active_file_context(self) -> None:
+        client = HandleMessageTests._client_for(ChatResponse(content="요약입니다."))
+        response = handle_message(
+            client, BridgeSession(),
+            {
+                "type": "chat", "id": 11,
+                "text": "이 파일을 요약해줘.",
+                "project_id": "jarvis-app",
+                "active_file": {
+                    "file_id": "f-abc",
+                    "root_id": "scratch-root",
+                    "path": "notes/idea.md",
+                    "name": "idea.md",
+                    "content": "주입되면 안 되는 내용",
+                },
+            },
+        )
+        self.assertEqual(response["status"], "final")
+        context = client.calls[0]["context"]
+        self.assertEqual(context["active_file"]["path"], "notes/idea.md")
+        self.assertNotIn("content", context["active_file"])
+
+    def test_chat_without_active_file_has_no_context(self) -> None:
+        client = HandleMessageTests._client_for(ChatResponse(content="답변."))
+        handle_message(
+            client, BridgeSession(),
+            {"type": "chat", "id": 12, "text": "안녕", "project_id": "jarvis-app"},
+        )
+        self.assertIsNone(client.calls[0]["context"])
+
+    def test_confirm_reuses_last_active_file(self) -> None:
+        client = HandleMessageTests._client_for(
+            ChatResponse(content="", tool_calls=[proposed_call()], finish_reason="awaiting_confirmation"),
+            ChatResponse(content="생성했습니다."),
+        )
+        session = BridgeSession()
+        handle_message(
+            client, session,
+            {
+                "type": "chat", "id": 13,
+                "text": "새 task를 추가해줘.",
+                "project_id": "jarvis-app",
+                "active_file": {
+                    "file_id": "f-abc",
+                    "root_id": "scratch-root",
+                    "path": "notes/idea.md",
+                },
+            },
+        )
+        handle_message(
+            client, session,
+            {
+                "type": "confirm", "id": 14,
+                "tool_call": {
+                    "name": "create_task",
+                    "arguments": {"project_id": "jarvis-app", "title": "새 task", "reason": "브리지 검증"},
+                },
+            },
+        )
+        context = client.calls[1]["context"]
+        self.assertEqual(context["active_file"]["path"], "notes/idea.md")
+
+    def test_client_injects_active_file_system_line(self) -> None:
+        """chat_with_tools가 context.active_file을 system 한 줄로 변환하는지 검증."""
+        fields = _active_file_context({
+            "active_file": {"root_id": "r", "path": "notes/idea.md", "name": "idea.md"},
+        })
+        line = _active_file_system_line({"active_file": fields})
+        self.assertIn("notes/idea.md", line)
+        self.assertIn("approved root: r", line)
+        self.assertIsNone(_active_file_system_line(None))
+        self.assertIsNone(_active_file_system_line({}))
+        self.assertIsNone(_active_file_system_line({"active_file": {"path": ""}}))
 
 
 if __name__ == "__main__":
