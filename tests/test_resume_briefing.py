@@ -457,9 +457,95 @@ class ResumeBriefingLinkAccuracyTests(unittest.TestCase):
         task_entry = next(e for e in data["resources"] if e["source"] == "task")
         self.assertIsNone(project_entry["task_id"])
         self.assertEqual(project_entry["file"]["path"], "graduation/paper.txt")
-        self.assertEqual(task_entry["task_id"], "t-open1")
-        # next_action 자료에는 task 링크만 (프로젝트 링크가 섞이지 않는다)
-        self.assertEqual(
-            [e["file"]["path"] for e in data["next_action"]["resources"]],
-            ["graduation/notes.md"],
-        )
+
+
+class ResumeBriefingNextActionQualityTests(unittest.TestCase):
+    """M4: 세션 히스토리 기반 다음 행동(next_action) 품질 검증."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.fixture = _build_fixture(Path(self.tmp.name))
+        self.registry = _make_registry(self.fixture)
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def test_next_action_prioritizes_touched_task_from_recent_session(self) -> None:
+        """최근 세션에서 직접 다룬 task가 목록의 첫 번째가 아니더라도 우선 추천된다."""
+        traces = self.fixture["traces"]
+        # t-open1이 목록 첫 번째이지만, 최근 세션에서는 t-open2('초안 개요 작성')를 다룸
+        trace_entry = {
+            "trace_id": "trace-t2",
+            "ts": "2026-09-24T12:00:00+00:00",
+            "request": {
+                "metadata": {"project_id": "graduation-thesis"},
+                "messages": [{"role": "user", "content": "t-open2 작업 상황을 기록해줘"}],
+            },
+            "tool_results": [
+                {
+                    "call": {
+                        "name": "update_task",
+                        "arguments": {"task_id": "t-open2", "project_id": "graduation-thesis"},
+                    }
+                }
+            ],
+            "response": {"content": "t-open2 태스크를 업데이트했습니다."},
+        }
+        (traces / "trace_t2.json").write_text(json.dumps(trace_entry), encoding="utf-8")
+
+        result = self.registry.execute("resume_briefing", {"query": "졸업논문"})
+        self.assertTrue(result.ok, result.error)
+        next_action = result.data["next_action"]
+        self.assertEqual(next_action["task_id"], "t-open2")
+        self.assertEqual(next_action["basis"], "최근 세션에서 진행 중이던 작업")
+
+    def test_next_action_prioritizes_task_linked_to_touched_file(self) -> None:
+        """최근 세션에서 특정 파일을 열람/작업했다면 해당 파일과 연결된 task를 우선 추천한다."""
+        traces = self.fixture["traces"]
+        mem = self.fixture["mem"]
+        ws = self.fixture["workspace"]
+        files = FileStore({"workspace": str(ws)})
+        workspace = WorkspaceManager(files, default_registry_file(mem))
+        workspace.scan_root()
+        ref_paper = workspace.registry.by_path("workspace", "graduation/paper.txt")
+        self.assertIsNotNone(ref_paper)
+
+        resources = ProjectResources(default_links_file(mem), mem, workspace=workspace)
+        # t-open2에 graduation/paper.txt 연결
+        resources.link_task_file("t-open2", ref_paper.id, "reference")
+
+        trace_entry = {
+            "trace_id": "trace-f",
+            "ts": "2026-09-24T12:00:00+00:00",
+            "request": {
+                "metadata": {
+                    "project_id": "graduation-thesis",
+                    "active_file": {"name": "paper.txt", "path": "graduation/paper.txt"},
+                },
+                "messages": [{"role": "user", "content": "paper.txt 내용 요약해줘"}],
+            },
+            "tool_results": [
+                {
+                    "call": {
+                        "name": "read_file",
+                        "arguments": {"path": "graduation/paper.txt"},
+                    }
+                }
+            ],
+            "response": {"content": "paper.txt 요약 완료"},
+        }
+        (traces / "trace_f.json").write_text(json.dumps(trace_entry), encoding="utf-8")
+
+        result = self.registry.execute("resume_briefing", {"query": "졸업논문"})
+        self.assertTrue(result.ok, result.error)
+        next_action = result.data["next_action"]
+        self.assertEqual(next_action["task_id"], "t-open2")
+        self.assertIn("최근 세션 작업 파일", next_action["basis"])
+
+    def test_next_action_fallback_to_first_open_task_when_no_session_signals(self) -> None:
+        """세션 신호가 없을 때는 첫 번째 미완료 task로 안전하게 폴백한다."""
+        result = self.registry.execute("resume_briefing", {"query": "졸업논문"})
+        self.assertTrue(result.ok, result.error)
+        next_action = result.data["next_action"]
+        self.assertEqual(next_action["task_id"], "t-open1")
+        self.assertEqual(next_action["basis"], "미완료 task 중 목록 순서 첫 번째")

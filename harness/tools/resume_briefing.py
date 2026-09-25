@@ -46,37 +46,172 @@ def _excerpt(text: str | None, limit: int = _SUMMARY_EXCERPT_CHARS) -> str:
     return flat[:limit].rstrip() + "…"
 
 
-def _recent_activity(trace_dir: Path | None, project_id: str) -> list[dict[str, Any]]:
-    """trace에서 이 프로젝트의 최근 활동만 추출 (metadata.project_id 일치).
+def _recent_activity(
+    trace_dir: Path | None, project_id: str
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """trace에서 이 프로젝트의 최근 활동 및 세션 신호(touched tasks, files) 추출.
 
-    활동이 없으면 빈 목록을 반환한다 — 기록이 없으면 지어내지 않는다.
+    반환: (recent_activity_entries, session_signals)
+    session_signals:
+      - touched_task_ids: 최근 활동에서 조작/참조된 task_id (순서대로, 최신 우선)
+      - touched_file_paths: 최근 활동에서 참조된 파일 경로/이름 (순서대로, 최신 우선)
+      - last_user_intent: 가장 최근 사용자 발화 텍스트
     """
     if trace_dir is None or not trace_dir.is_dir():
-        return []
+        return [], {}
     entries: list[dict[str, Any]] = []
+    touched_task_ids: list[str] = []
+    touched_files: list[str] = []
+    last_user_intent: str | None = None
+
     for path in trace_dir.glob("*.json"):
         try:
             entry = json.loads(path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             continue
-        metadata = ((entry.get("request") or {}).get("metadata") or {})
+        req = entry.get("request") or {}
+        metadata = req.get("metadata") or {}
         if metadata.get("project_id") != project_id:
             continue
+
+        ts = entry.get("ts") or ""
         tools_used: list[str] = []
+        entry_task_ids: list[str] = []
+        entry_files: list[str] = []
+
+        # active_file in metadata
+        active_file = metadata.get("active_file")
+        if isinstance(active_file, dict):
+            p = active_file.get("path") or active_file.get("name")
+            if p and p not in entry_files:
+                entry_files.append(str(p))
+
         for item in entry.get("tool_results") or []:
             call = item.get("call") or {}
             name = call.get("name")
             if isinstance(name, str) and name and name not in tools_used:
                 tools_used.append(name)
+            args = call.get("arguments") or {}
+            # task_id detection
+            tid = args.get("task_id")
+            if isinstance(tid, str) and tid and tid not in entry_task_ids:
+                entry_task_ids.append(tid)
+            # file path / locator detection
+            for f_key in ("path", "relative_path", "filename"):
+                fval = args.get(f_key)
+                if isinstance(fval, str) and fval and fval not in entry_files:
+                    entry_files.append(fval)
+
+        # user message text
+        user_msg = ""
+        for m in req.get("messages") or []:
+            if m.get("role") == "user":
+                content = m.get("content")
+                if isinstance(content, str) and content.strip():
+                    # 시스템 지시성 프롬프트 ("The internal reads above...") 제외
+                    if not content.startswith("The internal reads above"):
+                        user_msg = content.strip()
+
         response = entry.get("response") or {}
         entries.append({
-            "ts": entry.get("ts"),
+            "ts": ts,
             "turns": entry.get("turns"),
             "tools_used": tools_used,
             "summary": _excerpt(response.get("content")),
+            "_task_ids": entry_task_ids,
+            "_files": entry_files,
+            "_user_msg": user_msg,
         })
+
     entries.sort(key=lambda item: str(item.get("ts") or ""), reverse=True)
-    return entries[:_MAX_ACTIVITY]
+
+    if entries:
+        for e in entries:
+            for tid in e["_task_ids"]:
+                if tid not in touched_task_ids:
+                    touched_task_ids.append(tid)
+            for f in e["_files"]:
+                if f not in touched_files:
+                    touched_files.append(f)
+            if last_user_intent is None and e.get("_user_msg"):
+                last_user_intent = e["_user_msg"]
+
+    activity_out = [
+        {
+            "ts": e.get("ts"),
+            "turns": e.get("turns"),
+            "tools_used": e.get("tools_used"),
+            "summary": e.get("summary"),
+        }
+        for e in entries[:_MAX_ACTIVITY]
+    ]
+
+    session_signals = {
+        "touched_task_ids": touched_task_ids,
+        "touched_files": touched_files,
+        "last_user_intent": last_user_intent,
+    }
+    return activity_out, session_signals
+
+
+def _select_next_action(
+    open_tasks: list[dict[str, Any]],
+    session_signals: dict[str, Any],
+    task_entries: dict[str, list[dict[str, Any]]],
+) -> dict[str, Any] | None:
+    """세션 히스토리와 task 관계를 고려하여 가장 적합한 다음 행동(next_action)을 결정.
+
+    우선순위:
+    1. 최근 세션에서 직접 다루었던(touched) 미완료 task (작업 연속성)
+    2. 최근 세션에서 다룬 파일과 연결된 미완료 task (자료 기반 연속성)
+    3. 기본 폴백: 목록 순서 첫 번째 미완료 task
+    """
+    if not open_tasks:
+        return None
+
+    open_by_id = {t["id"]: t for t in open_tasks}
+    touched_task_ids = session_signals.get("touched_task_ids") or []
+    touched_files = session_signals.get("touched_files") or []
+
+    # 1. 최근 세션에서 다룬 task_id 매칭
+    for tid in touched_task_ids:
+        if tid in open_by_id:
+            matched_task = open_by_id[tid]
+            return {
+                "task_id": matched_task["id"],
+                "title": matched_task.get("title", ""),
+                "reason": matched_task.get("reason", ""),
+                "basis": "최근 세션에서 진행 중이던 작업",
+                "resources": task_entries.get(matched_task["id"], []),
+            }
+
+    # 2. 최근 세션에서 다룬 파일과 연결된 task 매칭
+    if touched_files:
+        for task in open_tasks:
+            entries = task_entries.get(task["id"], [])
+            for entry in entries:
+                file_info = entry.get("file") or {}
+                fname = file_info.get("name") or ""
+                fpath = file_info.get("path") or ""
+                for tf in touched_files:
+                    if tf and (tf == fname or tf == fpath or tf.endswith(fpath) or fpath.endswith(tf)):
+                        return {
+                            "task_id": task["id"],
+                            "title": task.get("title", ""),
+                            "reason": task.get("reason", ""),
+                            "basis": f"최근 세션 작업 파일({fname or fpath})과 연결된 작업",
+                            "resources": entries,
+                        }
+
+    # 3. 폴백: 첫 번째 미완료 task
+    task = open_tasks[0]
+    return {
+        "task_id": task["id"],
+        "title": task.get("title", ""),
+        "reason": task.get("reason", ""),
+        "basis": "미완료 task 중 목록 순서 첫 번째",
+        "resources": task_entries.get(task["id"], []),
+    }
 
 
 def _linked_entry(
@@ -223,19 +358,15 @@ def build_resume_briefing_tool(
         resources = resources[:_MAX_RESOURCES]
 
         # ---------- 4) 마지막 활동 (이 프로젝트 trace만) ----------
-        last_activity = _recent_activity(resolved_trace_dir, project["id"])
+        last_activity, session_signals = _recent_activity(
+            resolved_trace_dir, project["id"]
+        )
 
         # ---------- 5) 다음 행동 (파생·일시적 — 영속 엔티티 아님, V4 §6) ----------
-        next_action: dict[str, Any] | None = None
-        if open_tasks:
-            task = open_tasks[0]
-            next_action = {
-                "task_id": task["id"],
-                "title": task.get("title", ""),
-                "reason": task.get("reason", ""),
-                "basis": "미완료 task 중 목록 순서 첫 번째",
-                "resources": task_entries.get(task["id"], []),
-            }
+        # M4 — 세션 히스토리(최근 다룬 task 및 작업 파일)를 활용하여 가장 연결성 높은 작업 추천
+        next_action = _select_next_action(
+            open_tasks, session_signals, task_entries
+        )
 
         # ---------- 6) notes — 빈 영역은 지어내지 않고 명시 ----------
         notes: list[str] = []
