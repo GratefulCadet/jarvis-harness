@@ -126,6 +126,7 @@ class HarnessClient:
             task_file=self._config.task_file,
             pages_dir=self._config.pages_dir,
             file_roots=self._config.file_roots,
+            trace_dir=self._config.trace_dir,
         )
 
     @property

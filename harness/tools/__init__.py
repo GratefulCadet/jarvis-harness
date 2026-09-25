@@ -14,6 +14,7 @@ from harness.tools.get_project_context import build_get_project_context_tool
 from harness.tools.list_current_tasks import build_list_current_tasks_tool
 from harness.tools.memory_context import MemoryContextReader, UnknownProjectError
 from harness.tools.registry import Tool, ToolRegistry, validate_arguments
+from harness.tools.resume_briefing import build_resume_briefing_tool
 from harness.tools.schemas import propose_next_action as propose_next_action_schema
 
 """§8 초기 tool 등록.
@@ -26,6 +27,7 @@ handler 보유 (Slice 1·4·5 + Context Discovery reference 구현 — memory �
 - search_projects (read) — 이름/작업 내용으로 프로젝트 검색
 - search_context (read) — Project/Task/Page/File 통합 검색
 - list_files / read_file / search_files (read) — 승인된 루트만 (§7)
+- resume_briefing (read) — 복귀 브리핑: 프로젝트·task·자료·마지막 활동·다음 행동 제안
 
 propose_next_action은 schema-only로 등록해 registry가 명확한 안내 오류를
 반환한다(JARVIS 내부 next-action 로직 대상 — §8.1).
@@ -58,6 +60,7 @@ def build_default_registry(
     task_file: str | Path | None = None,
     pages_dir: str | Path | None = None,
     file_roots: str | dict[str, str] | None = None,
+    trace_dir: str | Path | None = None,
 ) -> ToolRegistry:
     registry = ToolRegistry()
     registry.register(build_get_project_context_tool(memory_dir))
@@ -68,6 +71,15 @@ def build_default_registry(
     )
     registry.register(
         build_search_context_tool(memory_dir, task_file, pages_dir, file_roots)
+    )
+    registry.register(
+        build_resume_briefing_tool(
+            memory_dir,
+            task_file,
+            pages_dir=pages_dir,
+            file_roots=file_roots,
+            trace_dir=trace_dir,
+        )
     )
     for tool in build_file_tools(file_roots, memory_dir=memory_dir):
         registry.register(tool)

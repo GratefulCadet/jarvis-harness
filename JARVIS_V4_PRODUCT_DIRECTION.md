@@ -223,6 +223,7 @@ The filesystem and contextual action capabilities are categorized into three dis
   → answer
   ```
   These actions are strictly read-only analysis and do NOT mutate the filesystem or require gate approval.
+- **Resume Briefing (read-only):** Verified one-utterance work resume (`"계속하자"` → `resume_briefing` read tool). Deterministically assembles project resolution, open/completed tasks, linked resources, and last-session activity from canonical sources, plus a **derived, transient** next-action proposal (no Goal/Next Action persistence). The `[시작]` handoff only sets transient focus/active-file UI state.
 
 ### B. ALLOWED FUTURE DIRECTION
 - **AI-proposed file edits:** Contextual suggestions for code/file diffs, subject to explicit human review.

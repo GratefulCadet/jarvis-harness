@@ -68,6 +68,39 @@ def propose_next_action() -> ToolSchema:
     )
 
 
+def resume_briefing() -> ToolSchema:
+    """복귀 브리핑 조립 (read — Resume & Continue).
+
+    사용자가 중단 작업을 이어가려 할 때 가장 먼저 호출해 프로젝트·task·자료·
+    마지막 활동·다음 행동 제안을 한 번에 받는다.
+    """
+    return _schema(
+        "resume_briefing",
+        "사용자가 중단했던 작업을 이어가려 할 때(예: '계속하자', '이어서', '다시 시작') "
+        "가장 먼저 호출하는 읽기 기능이다. 프로젝트 확정, 진행 중·완료 task, "
+        "연결된 파일, 마지막 활동 기록, 다음 행동 제안을 한 번에 반환한다. "
+        "반환 내용을 한국어로 요약해 제시하고 이어서 할 일을 안내한다. "
+        "파일이나 상태를 변경하지 않는다.",
+        {
+            "query": {
+                "type": "string",
+                "description": (
+                    "프로젝트를 찾는 데 쓰는 사용자 표현 — '졸업논문', 프로젝트 "
+                    "이름이나 하던 작업 내용. project_id가 있으면 생략 가능."
+                ),
+            },
+            "project_id": {
+                "type": "string",
+                "description": (
+                    "이미 알고 있는 프로젝트 식별자. 있으면 query보다 우선한다. "
+                    "생략 가능."
+                ),
+            },
+        },
+        [],
+    )
+
+
 def create_task() -> ToolSchema:
     """새 task 생성 (write — 사용자 확인 필요, §8.4)."""
     return _schema(
