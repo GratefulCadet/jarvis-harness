@@ -920,6 +920,14 @@ As of the current checkpoint, these are not solved:
 - unified Knowledge + Execution read model is not yet implemented
 - end-to-end resume flow has not been verified through the real Electron GUI
   (verified through the bridge/Python path only)
+- Milestone A (one-turn task creation reliability) is verified with the real
+  Qwen model through the bridge/HTTP path only, not through the real Electron
+  GUI screen (visual confirmation still pending — preview compositing gap below)
+- Milestone B (link the active file to a just-created task, and have both come
+  back on resume) is verified end-to-end through the real bridge with the real
+  model and real FileRefs, but the **button itself has never been clicked in the
+  real GUI** — the affordance is covered by pure-logic tests only, for the same
+  rendering reason as above.
 
 Settled since this list was first written — do not report these as open:
 
@@ -936,6 +944,47 @@ Settled since this list was first written — do not report these as open:
   `TreePrototype.jsx`). This is response-scoped detection, not a push
   subscription — but the user-visible staleness is closed, so do not re-report
   it as "no refresh".
+- one-turn task creation reliability (V4 §13-A): a plain natural-language
+  request ("할 일 하나만 추가해줘") now reaches an `awaiting_confirmation`
+  `create_task` proposal in a single model turn. Root cause was prompt/schema
+  shaped (V4 §16 step 8): the bridge sent no project context (the model had to
+  infer a valid `project_id` via read tools and the post-read continuation
+  instruction steered it back to a text answer), and the system prompt carried
+  no write-proposal policy. Fixes: bridge injects a project-context system
+  message on chat and reuses it on confirm (`system_messages` parameter on
+  `chat_with_tools`); continuation message now pushes a write-intent proposal
+  through instead of summarizing; `_CAPABILITY_GROUNDING` broken sentence
+  repaired plus an explicit "propose the write now" policy; injected
+  continuation messages carry an internal `__grounding` flag so
+  `ground_final_response` no longer disables itself after any successful read
+  (harness-injected instructions were being scanned as user text).
+  Verified live: 3/3 natural-language phrasings reached the proposal in
+  `turns=1` and confirmed proposals executed with grounded final answers.
+- the "task ↔ its files" link path (V4 §13-B): after a task is created while a
+  workspace file is open, the runtime surface now **offers** linking that active
+  file to the just-created task, and the link is written only when the user
+  presses the button. It reuses the one existing canonical path
+  (`jarvisLinkApi.linkTaskFile` → `link_task_file` bridge message →
+  `ProjectResources.link_task_file` → `resource_links.json`); no second write
+  path was added. The affordance needs all three of: an actually-created task
+  (its id exists only in the response events), the active file sent with that
+  request, and a stable FileRef identity (a bare path is never offered, and the
+  bridge rejects it anyway). No active file → nothing is shown, and nothing is
+  ever linked automatically (V4 §13-C).
+- resume accuracy for linked files: resource collection is no longer limited to
+  the first N open tasks. A newly created task always sits at the end of the
+  list while the recommendation logic may pick *any* recently touched task, so a
+  recommended task could appear with an empty `resources` list. Lookups now
+  cover the leading window plus recently touched tasks
+  (`_MAX_TOUCHED_TASK_LOOKUPS`). Found by live verification, not by tests —
+  the deterministic fixture had too few open tasks to expose it.
+- PiP and Main now read the same color source. Main's theme tokens were scoped
+  to `.command-center-interface`, so the PiP surface could not consume them and
+  carried the archived cyan palette as literals. Shared semantic tokens now live
+  on `.jarvis-shell` (values identical to what Main already used), Main's
+  `--command-*` alias them, and the PiP presence chrome + shared runtime panel
+  read from the same tokens. Main's appearance is unchanged; only the PiP
+  literals were replaced.
 
 Treat this section as a dated implementation snapshot.
 
