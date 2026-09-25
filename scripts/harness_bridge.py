@@ -46,6 +46,7 @@ from harness.client import HarnessClient
 from harness.config import PROJECT_ROOT, HarnessConfig
 from harness.trace import TraceRecorder
 from harness.tools.discovery import Discovery
+from harness.tools.discovery_tools import build_list_projects_tool
 from harness.tools.file_store import DEFAULT_MAX_DEPTH
 from harness.tools.memory_context import MemoryContextReader
 from harness.tools.page_store import PageStore
@@ -1331,6 +1332,66 @@ class BridgeSession:
     def __init__(self) -> None:
         self.last_text: str | None = None
         self.last_active_file: dict[str, str] | None = None
+        # confirm은 project_id를 받지 않는다. 마지막 chat의 프로젝트를 이어받아
+        # 복귀 브리핑이 이 프로젝트의 trace로 필터링할 수 있게 한다(M5).
+        self.last_project_id: str | None = None
+        # Milestone A — 마지막 chat에서 만든 프로젝트 문맥 요약. confirm 경로가
+        # 이어받아 모델 컨텍스트에 다시 주입한다(프로젝트 id·목록 재해석 방지).
+        self.last_project_context: str | None = None
+
+
+def _project_context_line(client: HarnessClient, project_id: str) -> str | None:
+    """Milestone A — 현재 프로젝트 문맥을 모델용 시스템 메시지 한 개로 요약한다.
+
+    왜 필요한가: bridge는 messages=[user 발화]만 넘긴다. 모델은 유효한 project_id를
+    모르고, create_task의 project_id는 registry 검증(Active 목록 대조)을 통과해야
+    하므로 모델은 read tool로 목록을 읽어 "추측"해야 한다. 그 사이
+    _CONTINUE_AFTER_TOOLS의 "답변으로 전환" 지침이 개입해 write 의도가
+    최종 텍스트로 흘러가 버린다. 프로젝트 문맥을 시스템 메시지로 주입하면 모델이
+    발화 첫 턴에 올바른 project_id로 create_task를 제안할 수 있다.
+
+    실패해도(None) chat을 막지 않는다 — 모델이 기존 read tool로 스스로 찾는
+    기존 경로가 그대로 남는다.
+    """
+    # fake client(테스트)도 있어 속성 자체를 방어적으로 본다.
+    registry = getattr(client, "tools", None)
+    tool = registry.get("list_projects") if registry is not None else None
+    if tool is None or getattr(tool, "handler", None) is None:
+        return None
+    try:
+        result = tool.handler({})
+    except Exception:
+        return None
+    projects = result.get("projects") if isinstance(result, dict) else None
+    if not isinstance(projects, list) or not projects:
+        return None
+    lines: list[str] = ["Current project context (do not ask the user for these):"]
+    current = next(
+        (p for p in projects if isinstance(p, dict) and p.get("id") == project_id),
+        None,
+    )
+    if isinstance(current, dict):
+        title = current.get("title") or project_id
+        open_count = int(current.get("task_count") or 0) - int(
+            current.get("done_count") or 0
+        )
+        lines.append(
+            f"- Active project: {project_id} — {title} "
+            f"({open_count} open task(s)). This is the user's current project."
+        )
+    for project in projects:
+        if not isinstance(project, dict):
+            continue
+        pid = project.get("id")
+        title = project.get("title") or pid
+        if not isinstance(pid, str) or not pid.strip() or pid == project_id:
+            continue
+        lines.append(f"- Project id {pid} — {title}")
+    lines.append(
+        "Use these exact ids internally. Never ask the user to confirm, "
+        "repeat, or spell out a project."
+    )
+    return "\n".join(lines)
 
 
 def _active_file_context(msg: dict[str, Any]) -> dict[str, str] | None:
@@ -1431,6 +1492,54 @@ def _record_activity(
     except (OSError, TypeError, ValueError):
         # 기록은 부수효과 — 절대 사용자 작업을 막지 않는다.
         return
+
+
+# 모델 tool loop으로 task를 만드는 write 도구. M5의 deterministic 기록과 같은
+# 목적(세션 신호)이지만 경로가 다르므로 여기서 별도로 다룬다.
+_TASK_CREATING_TOOLS = frozenset({"create_task"})
+
+
+def _record_model_task_writes(
+    client: HarnessClient, trace: dict[str, Any], project_id: Any
+) -> None:
+    """모델이 실제로 만든 task의 생성된 id를 세션 신호로 남긴다.
+
+    M5는 deterministic bridge 작업(create/update/delete, link)을 기록하지만
+    모델 tool loop 경로는 다루지 않았다. 그 경로에는 두 가지 문제가 있다.
+
+    1. confirm 응답 metadata에는 project_id가 없다(chat에는 있다). 복귀 브리핑은
+       프로젝트 단위로 trace를 걸러내므로 이 trace는 아예 보이지 않았다.
+    2. create_task의 인자에는 task_id가 없다 — 모델은 id를 알 수 없고 TaskStore가
+       생성한다. 실제 id는 tool result에만 존재한다.
+
+    그래서 "성공적으로 실행된 task 생성"을 응답 events에서 찾아 생성된 id로
+    기록한다. 여기서는 결과 데이터를 읽으므로 모델이 모르는 id를 알 수 있다.
+    """
+    if not isinstance(project_id, str) or not project_id.strip():
+        return
+    for event in trace.get("events") or []:
+        if not isinstance(event, dict):
+            continue
+        if event.get("name") not in _TASK_CREATING_TOOLS:
+            continue
+        # 승인 대기에서 막힌 제안과 실패는 상태를 바꾸지 않았다.
+        if event.get("requires_confirmation") or event.get("ok") is not True:
+            continue
+        data = event.get("data") or {}
+        task_id = data.get("id")
+        if not isinstance(task_id, str) or not task_id.strip():
+            continue
+        _record_activity(
+            client,
+            project_id=project_id,
+            operation="create_task",
+            arguments={
+                "project_id": project_id,
+                "task_id": task_id,
+                "title": data.get("title"),
+            },
+            summary=f"새 작업 추가: {data.get('title') or task_id}",
+        )
 
 
 def handle_message(
@@ -1538,6 +1647,7 @@ def handle_message(
                 str(PROJECT_ROOT).replace("\\", "/") + "/data/"
             )
             trace_info_kwargs: dict[str, Any] = {}
+            system_messages: list[dict[str, str]] | None = None
 
             if message_type == "chat":
                 text = msg.get("text")
@@ -1549,7 +1659,19 @@ def handle_message(
                 session.last_text = text
                 session.last_active_file = _active_file_context(msg)
                 project_id = msg.get("project_id") or DEFAULT_PROJECT
+                session.last_project_id = project_id
+                # Milestone A — 프로젝트 문맥을 시스템 메시지로 주입한다.
+                # 모델이 유효한 project_id를 발화 첫 턴에 알게 하는 것이 목적.
+                session.last_project_context = _project_context_line(
+                    client, project_id
+                )
                 messages = [{"role": "user", "content": text}]
+                system_messages: list[dict[str, str]] | None = None
+                if session.last_project_context:
+                    system_messages = [{
+                        "role": "system",
+                        "content": session.last_project_context,
+                    }]
                 extra: dict[str, Any] = {"project_id": project_id}
                 if session.last_active_file:
                     extra["active_file"] = session.last_active_file
@@ -1564,8 +1686,22 @@ def handle_message(
                     }
                 text = session.last_text or "승인된 tool call을 실행하고 결과를 알려줘."
                 messages = [{"role": "user", "content": text}]
+                # confirm은 chat의 프로젝트 문맥을 이어받아 모델 컨텍스트를 동일하게
+                # 유지한다 — 최종 담변 생성 시에도 프로젝트 id를 모르는 상태가 아니다.
+                system_messages = (
+                    [{
+                        "role": "system",
+                        "content": session.last_project_context,
+                    }]
+                    if session.last_project_context
+                    else None
+                )
                 confirmed = [tool_call]
                 extra = {"confirmed_tool": tool_call.get("name")}
+                # M5 — confirm은 렌더러가 project_id를 보내지 않는다. 마지막 chat의
+                # 프로젝트를 이어붙이지 않으면 이 trace는 복귀 브리핑에서 보이지 않는다.
+                if session.last_project_id:
+                    extra["project_id"] = session.last_project_id
                 if session.last_active_file:
                     extra["active_file"] = session.last_active_file
 
@@ -1579,9 +1715,14 @@ def handle_message(
                 messages,
                 confirmed_calls=confirmed,
                 context=context,
+                system_messages=system_messages,
                 metadata={"source": "electron_bridge", **extra},
             )
             trace = _trace_info(client.config, response.trace_id)
+            # M5 — 모델이 만든 task의 생성된 id를 세션 신호로 남긴다.
+            _record_model_task_writes(
+                client, trace, extra.get("project_id") or session.last_project_id
+            )
 
             if response.finish_reason == "awaiting_confirmation":
                 blocked = list(response.tool_calls or [])

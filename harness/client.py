@@ -19,13 +19,30 @@ from harness.trace import TraceRecorder
 from harness.response_grounding import ground_final_response
 
 
-_FINAL_RESPONSE_GROUNDING = (
+_CONTINUE_AFTER_TOOLS = (
     "The internal reads above are complete. Now answer the ordinary user directly. "
     "Do not mention tools, function names, schemas, IDs, backticks, or invocation "
     "steps. Summarize what you found in natural language and say that JARVIS can "
     "resolve an existing project from its name or context. Keep any external "
     "handoff suggestion separate from the canonical fields."
 )
+
+# Milestone A — read tool이 성공한 뒤 모델의 기본 충동은 "읽은 것 보고하고 끝내기"
+# 다. 그래서 사용자가 이미 명확히 요청한 write(create_task 등)는 제안조차 되지 않고
+# 최종 텍스트로 흘러갔다. write 의도 call이 막혀 있던 턴이 아니라면(read가 성공한
+# 정상 흐름), 이 문장을 continuation에 덧붙여 이번 턴 안에 제안하도록 밀어준다.
+_WRITE_INTENT_CONTINUATION = (
+    "If the internal reads above support a change the user asked for — for "
+    "example creating a task — propose that write tool call now with concrete "
+    "arguments instead of asking the user to repeat or rephrase the request."
+)
+
+_WRITE_INTENT_TOOLS = frozenset({"create_task"})
+
+
+def _is_write_intent_call(call: ToolCall) -> bool:
+    """이번 턴에 write 제안이 섞여 있었는지 — continuation을 강화할지 판단."""
+    return call.name in _WRITE_INTENT_TOOLS
 
 
 _CAPABILITY_GROUNDING = (
@@ -48,10 +65,13 @@ _CAPABILITY_GROUNDING = (
     "asking for its ID. Before sending an ordinary answer, self-check it: if it "
     "contains a private function identifier, backticks, an invocation verb, or "
     "asks for an ID, rewrite that sentence as a result or natural capability "
-    "statement. Resolve projects by "
-    "provide internal IDs. Mention tool names only "
+    "statement. Resolve projects internally and never require internal IDs. "
+    "Mention tool names only "
     "when the user explicitly asks about internals, APIs, or debugging. Do not "
-    "wrap the user-facing answer in analysis or other internal XML tags."
+    "wrap the user-facing answer in analysis or other internal XML tags. "
+    "When the user asks for a change that maps to a supplied write tool — for "
+    "example adding a task — prefer proposing that call now with concrete "
+    "arguments over asking the user to repeat or confirm details you can infer."
 )
 
 
@@ -189,6 +209,7 @@ class HarnessClient:
         max_turns: int | None = None,
         approve_write: bool = False,
         confirmed_calls: Sequence[ToolCall | Mapping[str, Any]] | None = None,
+        system_messages: Sequence[dict[str, str]] | None = None,
     ) -> ChatResponse:
         """§5·§8.3 tool-call 루프 — JARVIS가 사용할 기본 접점.
 
@@ -220,6 +241,25 @@ class HarnessClient:
         active_file_line = _active_file_context(context)
         if active_file_line:
             working.insert(1, {"role": "system", "content": active_file_line})
+        # Milestone A — 호출자(bridge)가 주입하는 시스템 메시지(프로젝트 문맥 등).
+        # 기본 시스템 지침 바로 뒤에 붙여 모델이 발화 첫 턴에 문맥을 알게 한다.
+        head_system = 0
+        for message in working:
+            if message.get("role") == "system":
+                head_system += 1
+            else:
+                break
+        for extra_system in system_messages or ():
+            if not isinstance(extra_system, dict):
+                continue
+            if str(extra_system.get("role") or "") != "system":
+                continue
+            content = str(extra_system.get("content") or "").strip()
+            if not content:
+                continue
+            # 내부 플래그 키는 어댑터로 나가기 전에 떼어낸다.
+            working.insert(head_system, {"role": "system", "content": content})
+            head_system += 1
         trace_id = self._trace.new_trace_id()
         meta = self._meta()
         loop_meta: dict[str, Any] = {"max_turns": limit, "approve_write": approve_write}
@@ -331,9 +371,18 @@ class HarnessClient:
                 )
 
                 if not blocked:
+                    continuation = _CONTINUE_AFTER_TOOLS
+                    if any(
+                        _is_write_intent_call(call)
+                        for call in response.tool_calls
+                    ):
+                        continuation += "\n" + _WRITE_INTENT_CONTINUATION
+                    # __grounding 플래그: 이 메시지는 모델 지침이지 사용자 발화가
+                    # 아니다. response_grounding이 실제 사용자 질문만 보도록 표시한다.
                     working.append({
                         "role": "user",
-                        "content": _FINAL_RESPONSE_GROUNDING,
+                        "content": continuation,
+                        "__grounding": True,
                     })
 
                 if blocked:

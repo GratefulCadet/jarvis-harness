@@ -6,18 +6,25 @@ from typing import Any, Sequence
 from harness.tools.registry import ToolRegistry
 
 
+_INTERNAL_QUESTION_MARKERS = (
+    "tool", "api", "schema", "debug", "디버그", "내부", "개발자", "구현", "함수명"
+)
+
+
 def _is_internal_question(messages: Sequence[dict[str, Any]]) -> bool:
+    """사용자 발화 자체가 구현 내부(tool/api/schema) 질문인지 판정한다.
+
+    하네스가 read tool 성공 뒤 붙이는 continuation 지침(role="user", 내부에
+    "tools"라는 단어 포함)은 사용자 발화가 아니다. 이를 함께 스캔하면 read
+    tool이 한 번만 성공해도 grounding이 통째로 꺼져 버렸다(Milestone A에서
+    발견) — __grounding 플래그가 붙은 주입 메시지는 제외한다.
+    """
     text = " ".join(
         str(message.get("content") or "")
         for message in messages
-        if message.get("role") == "user"
+        if message.get("role") == "user" and not message.get("__grounding")
     ).lower()
-    return any(
-        marker in text
-        for marker in (
-            "tool", "api", "schema", "debug", "디버그", "내부", "개발자", "구현", "함수명"
-        )
-    )
+    return any(marker in text for marker in _INTERNAL_QUESTION_MARKERS)
 
 
 def _requires_internal_project_id(text: str) -> bool:

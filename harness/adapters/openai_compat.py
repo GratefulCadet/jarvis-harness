@@ -51,7 +51,8 @@ def _to_wire_message(message: dict) -> dict:
             "tool_call_id": message.get("tool_call_id") or "",
             "content": str(message.get("content") or ""),
         }
-    return dict(message)
+    # 내부 플래그 키(__grounding 등)는 wire로 나가지 않는다.
+    return {"role": role, "content": str(message.get("content") or "")}
 
 
 def _parse_arguments(raw: object) -> dict:

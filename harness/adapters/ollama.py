@@ -45,7 +45,8 @@ def _to_native_message(message: dict) -> dict:
     if role == "tool":
         # Ollama native는 tool_call_id를 쓰지 않는다 — 순서로 tool 결과를 짝지음.
         return {"role": "tool", "content": message.get("content") or ""}
-    return dict(message)
+    # 내부 플래그 키(__grounding 등)는 wire로 나가지 않는다.
+    return {"role": role, "content": message.get("content") or ""}
 
 
 def _parse_arguments(raw: object) -> dict:
