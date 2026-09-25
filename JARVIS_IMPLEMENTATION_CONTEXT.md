@@ -918,10 +918,6 @@ As of the current checkpoint, these are not solved:
 - arbitrary file access is not implemented
 - Page → Page recursive hierarchy is not implemented
 - unified Knowledge + Execution read model is not yet implemented
-- automatic Tree refresh after **model-initiated** Harness writes is not
-  guaranteed — Tree-originated Add/Edit/Delete re-snapshot from canonical state
-  after success, but there is no bridge-event subscription, so a task created by
-  Qwen through the tool loop does not refresh the Tree until a manual refresh
 - end-to-end resume flow has not been verified through the real Electron GUI
   (verified through the bridge/Python path only)
 
@@ -933,6 +929,13 @@ Settled since this list was first written — do not report these as open:
   user directory is the default and scratch is opt-in via `JARVIS_USE_SCRATCH`
 - Tree Add/Edit/Delete writes canonical state through `TaskStore` as single writer
   (`create_task` / `update_task` / `delete_task` bridge messages)
+- the Task Tree now refreshes after **model-initiated** writes. The renderer
+  inspects the executed tool events already returned on each bridge response and
+  re-snapshots from canonical state when a task-mutating tool actually ran
+  (`runtime.taskStateRevision` in `useJarvisRuntime.js` → refresh in
+  `TreePrototype.jsx`). This is response-scoped detection, not a push
+  subscription — but the user-visible staleness is closed, so do not re-report
+  it as "no refresh".
 
 Treat this section as a dated implementation snapshot.
 
