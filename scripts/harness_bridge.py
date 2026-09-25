@@ -68,19 +68,72 @@ ReadLine = Callable[[], str]
 WriteLine = Callable[[str], None]
 
 
-def resolve_memory_dir(configured: Path | None) -> tuple[Path, bool]:
-    """memory_dir 결정. 기본은 격리 scratch(data/electron_scratch).
+def get_canonical_user_state_dir() -> Path:
+    """운영체제별 표준 영구 사용자 memory 디렉터리 경로 반환.
+    - Windows: %APPDATA%/jarvis-app/memory
+    - Linux/macOS: ~/.config/jarvis-app/memory 또는 XDG_CONFIG_HOME
+    """
+    if sys.platform == "win32":
+        appdata = os.environ.get("APPDATA")
+        base = Path(appdata) if appdata else Path.home() / "AppData" / "Roaming"
+        return base / "jarvis-app" / "memory"
+    xdg = os.environ.get("XDG_CONFIG_HOME")
+    base = Path(xdg) if xdg else Path.home() / ".config"
+    return base / "jarvis-app" / "memory"
 
-    JARVIS_BRIDGE_MEMORY_DIR이 설정되면 그것을 우선한다 (실 memory opt-in).
+
+def migrate_scratch_to_user_state(
+    scratch_dir: Path, user_state_dir: Path
+) -> list[str]:
+    """scratch에 존재하는 초기 상태(projects.md, tasks.md, workspace_roots.json 등)를
+    사용자 state 디렉터리로 안전하게 최초 마이그레이션(copy-if-absent)한다.
+    이미 존재하는 사용자 파일은 절대 덮어쓰지 않는다.
+    반환: 복사된 파일명 리스트
+    """
+    if not scratch_dir.is_dir():
+        return []
+    migrated: list[str] = []
+    user_state_dir.mkdir(parents=True, exist_ok=True)
+    # 복사 대상: md 파일들 및 핵심 json 설정
+    candidates = ["projects.md", "tasks.md", "workspace_roots.json", "project_workspaces.json"]
+    for name in candidates:
+        src = scratch_dir / name
+        dst = user_state_dir / name
+        if src.is_file() and not dst.exists():
+            import shutil
+            shutil.copy2(src, dst)
+            migrated.append(name)
+    return migrated
+
+
+def resolve_memory_dir(configured: Path | None) -> tuple[Path, bool]:
+    """memory_dir 결정.
+    우선순위:
+    1. JARVIS_BRIDGE_MEMORY_DIR 또는 JARVIS_STATE_DIR 환경변수 (명시적 재정의)
+    2. configured (코드 또는 단위 테스트에서 직접 전달한 경우)
+    3. JARVIS_USE_SCRATCH=1 환경변수 (테스트/스모크/격리 scratch 강제)
+    4. 기본값: 표준 canonical 사용자 영구 디렉터리 (%APPDATA%/jarvis-app/memory 등).
+       최초 생성 시 scratch의 초기 템플릿/작업 상태를 안전하게 마이그레이션한다.
     반환: (memory_dir, scratch 여부)
     """
-    env_dir = os.environ.get("JARVIS_BRIDGE_MEMORY_DIR")
+    env_dir = os.environ.get("JARVIS_STATE_DIR") or os.environ.get("JARVIS_BRIDGE_MEMORY_DIR")
     if env_dir:
         return Path(env_dir), False
+
     if configured is not None:
         # 명시적으로 전달된 config(테스트 등)는 그대로 사용
         return configured, False
-    return DEFAULT_SCRATCH, True
+
+    use_scratch = os.environ.get("JARVIS_USE_SCRATCH", "").lower() in ("1", "true", "yes")
+    if use_scratch:
+        return DEFAULT_SCRATCH, True
+
+    user_state = get_canonical_user_state_dir()
+    # 최초 진입 시 scratch 상태가 있으면 무손실 복사(존재하지 않는 파일만)
+    if DEFAULT_SCRATCH.is_dir():
+        migrate_scratch_to_user_state(DEFAULT_SCRATCH, user_state)
+
+    return user_state, False
 
 
 def ensure_scratch_seed(memory_dir: Path) -> None:

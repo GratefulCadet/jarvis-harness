@@ -63,10 +63,23 @@ def proposed_call(title="새 task") -> ToolCall:
 
 
 class ResolveMemoryDirTests(unittest.TestCase):
-    def test_default_is_project_scratch(self) -> None:
-        memory_dir, scratch = resolve_memory_dir(None)
-        self.assertTrue(scratch)
-        self.assertIn("data", memory_dir.parts)
+    def test_default_is_canonical_user_state(self) -> None:
+        import os
+        import unittest.mock as mock
+        # Keep USERPROFILE / APPDATA intact, only remove custom JARVIS overrides
+        clean_env = {k: v for k, v in os.environ.items() if not k.startswith("JARVIS_")}
+        with mock.patch.dict(os.environ, clean_env, clear=True):
+            memory_dir, scratch = resolve_memory_dir(None)
+            self.assertFalse(scratch)
+            self.assertIn("jarvis-app", memory_dir.parts)
+
+    def test_scratch_flag_forces_scratch(self) -> None:
+        import os
+        import unittest.mock as mock
+        with mock.patch.dict(os.environ, {"JARVIS_USE_SCRATCH": "1"}):
+            memory_dir, scratch = resolve_memory_dir(None)
+            self.assertTrue(scratch)
+            self.assertIn("data", memory_dir.parts)
 
     def test_env_override_disables_scratch(self) -> None:
         import os
@@ -78,6 +91,26 @@ class ResolveMemoryDirTests(unittest.TestCase):
             memory_dir, scratch = resolve_memory_dir(None)
         self.assertFalse(scratch)
         self.assertEqual(memory_dir, Path("C:/tmp/real-memory"))
+
+    def test_migration_copies_absent_files_without_overwriting(self) -> None:
+        with tempfile.TemporaryDirectory() as scratch_tmp, tempfile.TemporaryDirectory() as user_tmp:
+            s_path = Path(scratch_tmp)
+            u_path = Path(user_tmp)
+
+            # scratch has projects.md and tasks.md
+            (s_path / "projects.md").write_text("# Scratch Projects", encoding="utf-8")
+            (s_path / "tasks.md").write_text("# Scratch Tasks", encoding="utf-8")
+
+            # user state already has existing tasks.md (must not be overwritten)
+            (u_path / "tasks.md").write_text("# User Existing Tasks", encoding="utf-8")
+
+            from scripts.harness_bridge import migrate_scratch_to_user_state
+            migrated = migrate_scratch_to_user_state(s_path, u_path)
+
+            self.assertIn("projects.md", migrated)
+            self.assertNotIn("tasks.md", migrated)
+            self.assertEqual((u_path / "projects.md").read_text(encoding="utf-8"), "# Scratch Projects")
+            self.assertEqual((u_path / "tasks.md").read_text(encoding="utf-8"), "# User Existing Tasks")
 
 
 class HandleMessageTests(unittest.TestCase):
