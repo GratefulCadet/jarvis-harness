@@ -224,6 +224,7 @@ The filesystem and contextual action capabilities are categorized into three dis
   ```
   These actions are strictly read-only analysis and do NOT mutate the filesystem or require gate approval.
 - **Resume Briefing (read-only):** Verified one-utterance work resume (`"계속하자"` → `resume_briefing` read tool). Deterministically assembles project resolution, open/completed tasks, linked resources, and last-session activity from canonical sources, plus a **derived, transient** next-action proposal (no Goal/Next Action persistence). The `[시작]` handoff only sets transient focus/active-file UI state.
+- **Explicit Task↔File linking:** Verified user-approved `ResourceLink` creation from both the context tree popover and the Assistant's active-file surface ("이 작업에 연결"), persisted canonically (`resource_links.json`); resume briefings attribute linked files per task and never surface unlinked files. AI auto-linking remains prohibited (§13-C).
 
 ### B. ALLOWED FUTURE DIRECTION
 - **AI-proposed file edits:** Contextual suggestions for code/file diffs, subject to explicit human review.
@@ -251,7 +252,7 @@ Current code is authoritative. Do not delete legacy code solely from memory or o
 ## 15. Active & Future Milestones
 
 With baseline runtime stability, active file tracking, and read-only Quick Actions established, the following capabilities represent authorized future directions for iterative development:
-- **Task ↔ Resource Linkage:** Seamless connection between active work and workspace files/pages.
+- **Broader Resource Linkage:** Page↔File and Page↔Task linking workflows, relation curation (Task↔File explicit linking is now implemented — §13-A).
 - **Progressive Search & Retrieval:** Progressive lexical and structured context recovery across connected roots.
 - **Gated AI File Edits (Future Milestone):** Gated, human-approved AI file modifications when explicitly requested.
 

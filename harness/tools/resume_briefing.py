@@ -193,7 +193,10 @@ def build_resume_briefing_tool(
         completed_tasks = [t for t in tasks if t.get("done")]
 
         # ---------- 3) 관련 자료 (persisted ResourceLink → 현재 locator resolve) ----------
+        # M2 — 자료 연결 정확도: workspace 전체가 아니라 명시적으로 연결된 파일만.
+        # task별 귀속을 함께 계산해 "그 작업에 실제 관련된 파일"을 구분한다.
         resources: list[dict[str, Any]] = []
+        task_entries: dict[str, list[dict[str, Any]]] = {}
         resources_api = discovery.resources
         if resources_api is not None:
             try:
@@ -211,8 +214,12 @@ def build_resume_briefing_tool(
                     )["resources"]
                 except Exception:
                     task_items = []
+                collected: list[dict[str, Any]] = []
                 for item in task_items:
-                    resources.append(_linked_entry("task", task["id"], item))
+                    entry = _linked_entry("task", task["id"], item)
+                    resources.append(entry)
+                    collected.append(entry)
+                task_entries[task["id"]] = collected
         resources = resources[:_MAX_RESOURCES]
 
         # ---------- 4) 마지막 활동 (이 프로젝트 trace만) ----------
@@ -227,10 +234,7 @@ def build_resume_briefing_tool(
                 "title": task.get("title", ""),
                 "reason": task.get("reason", ""),
                 "basis": "미완료 task 중 목록 순서 첫 번째",
-                "resources": [
-                    entry for entry in resources
-                    if entry.get("task_id") == task["id"]
-                ],
+                "resources": task_entries.get(task["id"], []),
             }
 
         # ---------- 6) notes — 빈 영역은 지어내지 않고 명시 ----------
@@ -273,6 +277,18 @@ def build_resume_briefing_tool(
                         "id": t["id"],
                         "title": t.get("title", ""),
                         "reason": t.get("reason", ""),
+                        # M2 — 조회한 task에 한해 실제 연결된 파일만 귀속 표기.
+                        # 조회 범위 밖 task에는 files 필드를 만들지 않는다(추측 금지).
+                        **(
+                            {
+                                "files": [
+                                    entry["file"]
+                                    for entry in task_entries.get(t["id"], [])
+                                ],
+                            }
+                            if t["id"] in task_entries
+                            else {}
+                        ),
                     }
                     for t in open_tasks
                 ],

@@ -17,10 +17,13 @@ from pathlib import Path
 - next_action는 파생·일시적 표현뿐 — 영속 엔티티를 만들지 않는다(V4 §6).
 """
 
+from harness.client import HarnessClient
+from harness.config import HarnessConfig
 from harness.tools import build_default_registry
 from harness.tools.file_store import FileStore
 from harness.tools.resource_links import ProjectResources, default_links_file
 from harness.tools.workspace import WorkspaceManager, default_registry_file
+from scripts.harness_bridge import BridgeSession, handle_message
 
 
 def _build_fixture(tmp: Path) -> dict[str, Path]:
@@ -329,4 +332,134 @@ class ResumeBriefingActivityTests(unittest.TestCase):
         self.assertEqual(result.data["tasks"]["open_count"], 0)
         self.assertTrue(
             any("미완료 task가 없습니다" in note for note in result.data["notes"])
+        )
+
+
+class ResumeBriefingLinkAccuracyTests(unittest.TestCase):
+    """M2 — 자료 연결 정확도: 명시적 Task↔File 링크가 복귀 브리핑에 실린다.
+
+    경로: 사용자 UI 행동 → bridge link_task_file → canonical ResourceLink
+    → resume_briefing이 "그 작업의 관련 파일"로 귀속해 반환한다.
+    연결되지 않은 파일은 절대 뜨지 않는다 — workspace 전체 노출 없음.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.fixture = _build_fixture(Path(self.tmp.name))
+        mem = self.fixture["mem"]
+        # 브리지와 동일한 FileRef identity 계층 스캔
+        files = FileStore({"workspace": str(self.fixture["workspace"])})
+        self.workspace = WorkspaceManager(files, default_registry_file(mem))
+        self.workspace.scan_root()
+        self.ref_notes = self.workspace.registry.by_path(
+            "workspace", "graduation/notes.md"
+        )
+        self.ref_paper = self.workspace.registry.by_path(
+            "workspace", "graduation/paper.txt"
+        )
+        self.assertIsNotNone(self.ref_notes)
+        self.assertIsNotNone(self.ref_paper)
+        cfg = HarnessConfig(
+            runtime="mock",
+            trace_dir=self.fixture["traces"],
+            memory_dir=mem,
+        )
+        cfg.task_file = mem / "tasks.md"
+        cfg.file_roots = {"workspace": str(self.fixture["workspace"])}
+        self.client = HarnessClient(cfg)
+        self.registry = _make_registry(self.fixture)
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def _send(self, payload: dict) -> dict:
+        return handle_message(self.client, BridgeSession(), payload)
+
+    def _brief(self) -> dict:
+        result = self.registry.execute("resume_briefing", {"query": "졸업논문"})
+        self.assertTrue(result.ok, result.error)
+        return result.data
+
+    def test_link_task_file_surfaces_in_briefing_and_next_action(self) -> None:
+        """J — 링크 1개: task 귀속으로 실리고, 미연결 파일은 뜨지 않는다."""
+        response = self._send({
+            "type": "link_task_file", "id": 1,
+            "task_id": "t-open1", "file_id": self.ref_notes.id,
+            "relation": "result",
+        })
+        self.assertEqual(response["status"], "ok", response)
+        self.assertTrue(response["created"])
+
+        data = self._brief()
+        resources = data["resources"]
+        self.assertEqual(len(resources), 1)
+        entry = resources[0]
+        self.assertEqual(entry["source"], "task")
+        self.assertEqual(entry["task_id"], "t-open1")
+        self.assertEqual(entry["relation"], "result")
+        self.assertEqual(entry["file"]["path"], "graduation/notes.md")
+
+        # 다음 행동(첫 미완료 = t-open1)의 자료로 실린다
+        self.assertEqual(data["next_action"]["task_id"], "t-open1")
+        self.assertEqual(len(data["next_action"]["resources"]), 1)
+        # task별 귀속 — 조회 대상 task에 files 필드, 실제 연결만
+        open_by_id = {t["id"]: t for t in data["tasks"]["open"]}
+        self.assertEqual(
+            [f["path"] for f in open_by_id["t-open1"]["files"]],
+            ["graduation/notes.md"],
+        )
+        self.assertEqual(open_by_id["t-open2"]["files"], [])
+        # 미연결 파일(paper.txt)은 어디에도 뜨지 않는다
+        all_paths = [e["file"]["path"] for e in resources]
+        self.assertNotIn("graduation/paper.txt", all_paths)
+
+    def test_link_is_idempotent_and_unlink_removes(self) -> None:
+        """K — 중복 링크 금지(멱등), unlink 시 브리핑에서도 사라진다."""
+        first = self._send({
+            "type": "link_task_file", "id": 1,
+            "task_id": "t-open1", "file_id": self.ref_notes.id,
+            "relation": "reference",
+        })
+        self.assertTrue(first["created"])
+        second = self._send({
+            "type": "link_task_file", "id": 2,
+            "task_id": "t-open1", "file_id": self.ref_notes.id,
+            "relation": "reference",
+        })
+        self.assertFalse(second["created"])
+        self.assertEqual(len(self._brief()["resources"]), 1)
+
+        removed = self._send({
+            "type": "unlink_task_file", "id": 3,
+            "link_id": first["link"]["id"],
+        })
+        self.assertEqual(removed["status"], "ok", removed)
+        data = self._brief()
+        self.assertEqual(data["resources"], [])
+        open_by_id = {t["id"]: t for t in data["tasks"]["open"]}
+        self.assertEqual(open_by_id["t-open1"]["files"], [])
+
+    def test_project_and_task_links_keep_attribution(self) -> None:
+        """L — 프로젝트 링크와 task 링크가 구분돼 귀속되고 섞이지 않는다."""
+        self._send({
+            "type": "link_project_file", "id": 1,
+            "project_id": "graduation-thesis", "file_id": self.ref_paper.id,
+            "relation": "reference",
+        })
+        self._send({
+            "type": "link_task_file", "id": 2,
+            "task_id": "t-open1", "file_id": self.ref_notes.id,
+            "relation": "result",
+        })
+        data = self._brief()
+        self.assertEqual(len(data["resources"]), 2)
+        project_entry = next(e for e in data["resources"] if e["source"] == "project")
+        task_entry = next(e for e in data["resources"] if e["source"] == "task")
+        self.assertIsNone(project_entry["task_id"])
+        self.assertEqual(project_entry["file"]["path"], "graduation/paper.txt")
+        self.assertEqual(task_entry["task_id"], "t-open1")
+        # next_action 자료에는 task 링크만 (프로젝트 링크가 섞이지 않는다)
+        self.assertEqual(
+            [e["file"]["path"] for e in data["next_action"]["resources"]],
+            ["graduation/notes.md"],
         )
