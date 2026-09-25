@@ -206,13 +206,35 @@ Unless a concrete contradiction is proven, preserve:
 
 The interaction redesign should sit on top of proven backend infrastructure. Do not rewrite stable backend infrastructure merely to simplify renderer code.
 
-## 13. Filesystem reality
+## 13. Filesystem reality & evolution
 
-The currently verified filesystem capability is primarily read-oriented: listing, searching, and reading approved Workspace roots.
+The filesystem and contextual action capabilities are categorized into three distinct operational states:
 
-Do not claim that JARVIS can create directories, create arbitrary Markdown, rename files, move files, delete files, or overwrite files unless current code directly proves that capability.
+### A. IMPLEMENTED AND VERIFIED
+- **Human manual Workspace file editing:** Verified read/write editor surface for human-driven file viewing and manual edits (`FileEditor.jsx`) with revision-based conflict detection.
+- **Active File context:** Verified single-source transient active file tracking in Electron (`App.jsx`) and bridge metadata passing (`harness_bridge.py`), grounding the model with single-line active file context (`client.py`).
+- **Read-only contextual quick actions:** Verified one-click shortcuts (Summarize, Explain, Review) in the Assistant surface (`CommandCenter.jsx`). These follow the standard read-only Assistant submit path:
+  ```text
+  Quick Action
+  → Assistant submit path
+  → Active File metadata
+  → Qwen
+  → existing read_file capability if needed
+  → answer
+  ```
+  These actions are strictly read-only analysis and do NOT mutate the filesystem or require gate approval.
 
-Future filesystem writes require a separate product and permission decision.
+### B. ALLOWED FUTURE DIRECTION
+- **AI-proposed file edits:** Contextual suggestions for code/file diffs, subject to explicit human review.
+- **Additional linking workflows:** Explicit linking between Tasks, Pages, and Workspace Files.
+- **Progressive retrieval:** Lexical and structured context recovery across connected roots.
+
+### C. NOT YET IMPLEMENTED / REQUIRES ITS OWN MILESTONE
+- **AI filesystem mutation:** Qwen directly modifying or overwriting files on the filesystem.
+- **Create / rename / move / delete:** Autonomous file or directory creation, renaming, moving, or deletion.
+- **Automatic persistent relationship creation:** Implicit background generation of permanent ResourceLinks without explicit user approval.
+
+Future autonomous file mutations require their own dedicated design, verification, and deliberate permission gating (§11).
 
 ## 14. Legacy code and history
 
@@ -225,21 +247,17 @@ Historical prototype code must not silently become product architecture. Verify 
 
 Current code is authoritative. Do not delete legacy code solely from memory or old reports.
 
-## 15. Paused milestones
+## 15. Active & Future Milestones
 
-Do **not** automatically continue any of the following:
+With baseline runtime stability, active file tracking, and read-only Quick Actions established, the following capabilities represent authorized future directions for iterative development:
+- **Task ↔ Resource Linkage:** Seamless connection between active work and workspace files/pages.
+- **Progressive Search & Retrieval:** Progressive lexical and structured context recovery across connected roots.
+- **Gated AI File Edits (Future Milestone):** Gated, human-approved AI file modifications when explicitly requested.
 
-- Task → Page ResourceLink V1
-- broad relationship graph expansion
-- semantic or vector search
-- embeddings
-- SQLite migration
-- LoRA / Soup
-- broad Page CRUD
-- autonomous filesystem writes
-- broad Project or Goal ontology expansion
-
-These require a new explicit user decision. Backend completeness is not currently the primary success metric.
+The following remain carefully gated and out of scope:
+- Unattended autonomous filesystem writes (must remain confirmed/gated).
+- Broad unconstrained ontology expansion without demonstrated user need.
+- Slash-command grammars or keyboard action palettes prior to dedicated milestones.
 
 ## 16. Current development phase and priority
 

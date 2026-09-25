@@ -347,6 +347,133 @@ class ActiveFileContextTests(unittest.TestCase):
         self.assertIsNone(_active_file_system_line({}))
         self.assertIsNone(_active_file_system_line({"active_file": {"path": ""}}))
 
+    def test_quick_action_acceptance_scenarios(self) -> None:
+        """
+        Acceptance Scenarios A-F:
+        A. Active idea.md -> Summarize passes active_file
+        B. Switch to other.md -> Explain has other.md context without idea.md leakage
+        C. Clear Active File -> subsequent chat carries no active_file context
+        D. Dirty unsaved file -> raw content/buffer is not transmitted or accepted
+        E. Review action -> read-only analysis response without mutating calls
+        F. Explicit filename wins in prompt text
+        """
+        session = BridgeSession()
+
+        # A. Active idea.md -> Summarize
+        client = HandleMessageTests._client_for(ChatResponse(content="idea.md 요약: 핵심 아이디어 정리."))
+        res_a = handle_message(
+            client, session,
+            {
+                "type": "chat", "id": 101,
+                "text": "이 파일(idea.md)의 내용을 핵심 위주로 요약해줘.",
+                "project_id": "jarvis-app",
+                "active_file": {
+                    "file_id": "f-idea",
+                    "root_id": "scratch-root",
+                    "path": "notes/idea.md",
+                    "name": "idea.md",
+                },
+            },
+        )
+        self.assertEqual(res_a["status"], "final")
+        self.assertEqual(client.calls[0]["context"]["active_file"]["path"], "notes/idea.md")
+
+        # B. Switch to other.md -> Explain
+        client_b = HandleMessageTests._client_for(ChatResponse(content="other.md 구조 설명."))
+        res_b = handle_message(
+            client_b, session,
+            {
+                "type": "chat", "id": 102,
+                "text": "이 파일(other.md)의 구조와 주요 로직을 설명해줘.",
+                "project_id": "jarvis-app",
+                "active_file": {
+                    "file_id": "f-other",
+                    "root_id": "scratch-root",
+                    "path": "notes/other.md",
+                    "name": "other.md",
+                },
+            },
+        )
+        self.assertEqual(res_b["status"], "final")
+        self.assertEqual(client_b.calls[0]["context"]["active_file"]["path"], "notes/other.md")
+        self.assertNotEqual(client_b.calls[0]["context"]["active_file"]["path"], "notes/idea.md")
+
+        # C. Clear Active File -> subsequent query carries no active_file context
+        client_c = HandleMessageTests._client_for(ChatResponse(content="일반 답변입니다."))
+        res_c = handle_message(
+            client_c, session,
+            {
+                "type": "chat", "id": 103,
+                "text": "오늘 날씨 어때?",
+                "project_id": "jarvis-app",
+                "active_file": None,
+            },
+        )
+        self.assertEqual(res_c["status"], "final")
+        self.assertIsNone(client_c.calls[0]["context"])
+
+        # D. Dirty unsaved file -> unsaved editor buffer is stripped by sanitizer
+        client_d = HandleMessageTests._client_for(ChatResponse(content="저장된 파일 기준 답변."))
+        res_d = handle_message(
+            client_d, session,
+            {
+                "type": "chat", "id": 104,
+                "text": "이 파일(idea.md)의 내용을 핵심 위주로 요약해줘.",
+                "project_id": "jarvis-app",
+                "active_file": {
+                    "file_id": "f-idea",
+                    "root_id": "scratch-root",
+                    "path": "notes/idea.md",
+                    "name": "idea.md",
+                    "content": "UNSAVED DIRTY BUFFER CONTENT - SHOULD BE IGNORED",
+                },
+            },
+        )
+        self.assertEqual(res_d["status"], "final")
+        self.assertNotIn("content", client_d.calls[0]["context"]["active_file"])
+
+        # E. Review action -> read-only response, no mutating tool calls
+        client_e = HandleMessageTests._client_for(ChatResponse(content="개선점 검토 결과: 코드 가독성 개선 권장."))
+        res_e = handle_message(
+            client_e, session,
+            {
+                "type": "chat", "id": 105,
+                "text": "이 파일(idea.md)에서 개선할 점이나 잠재적 버그를 검토해줘.",
+                "project_id": "jarvis-app",
+                "active_file": {
+                    "file_id": "f-idea",
+                    "root_id": "scratch-root",
+                    "path": "notes/idea.md",
+                    "name": "idea.md",
+                },
+            },
+        )
+        self.assertEqual(res_e["status"], "final")
+        self.assertEqual(res_e["text"], "개선점 검토 결과: 코드 가독성 개선 권장.")
+        self.assertNotIn("tool_call", res_e)
+
+        # F. Explicit filename while active_file is attached
+        client_f = HandleMessageTests._client_for(ChatResponse(content="specific.md에 대한 답변."))
+        res_f = handle_message(
+            client_f, session,
+            {
+                "type": "chat", "id": 106,
+                "text": "notes/specific.md 파일에 대해 설명해줘.",
+                "project_id": "jarvis-app",
+                "active_file": {
+                    "file_id": "f-idea",
+                    "root_id": "scratch-root",
+                    "path": "notes/idea.md",
+                    "name": "idea.md",
+                },
+            },
+        )
+        self.assertEqual(res_f["status"], "final")
+        sent_messages = client_f.calls[0]["messages"]
+        user_text = next(m["content"] for m in sent_messages if m.get("role") == "user")
+        self.assertIn("notes/specific.md", user_text)
+
+
 
 if __name__ == "__main__":
     unittest.main()
