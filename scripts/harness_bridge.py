@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """Electron ↔ Python Harness 브리지 (Task 1 — JARVIS Electron 통합).
 
 프로토콜: stdin/stdout에 JSON 객체 1줄씩 (JSONL). 응답마다 요청의 `id`를
@@ -21,23 +19,32 @@ from __future__ import annotations
   {"type": "response", "id": ..., "status": "error", "error": "..."}
 
 안전:
-- 기본 memory_dir는 격리 scratch(data/electron_scratch). 실 사용자 memory로
-  가려면 명시적으로 JARVIS_BRIDGE_MEMORY_DIR 환경변수를 지정해야 한다.
+- 기본 memory_dir는 표준 canonical 사용자 영구 디렉터리다
+  (Windows %APPDATA%/jarvis-app/memory, POSIX ~/.config/jarvis-app/memory).
+  격리 scratch(data/electron_scratch)는 더 이상 기본값이 아니다 —
+  테스트·스모크에서만 JARVIS_USE_SCRATCH=1로 강제한다.
+- JARVIS_STATE_DIR / JARVIS_BRIDGE_MEMORY_DIR가 명시적 재정의다.
+- 최초 진입 시 scratch에 상태가 있으면 copy-if-absent로 마이그레이션한다
+  (projects·tasks·roots·links·file_refs·pages). 기존 사용자 파일은 덮어쓰지 않는다.
 - confirm은 제안된 call을 그대로 confirmed_calls로 넘긴다 — 렌더러가 인자를
   바꿀 수 없다 (exact-call confirm, §8.3-2).
 - reject는 모델 호출 없이 0변이로 끝낸다.
 - bridge는 Freebuff가 아니라 Electron(JARVIS)이 spawn하는 자식 프로세스다.
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import os
+import shutil
 import sys
 from pathlib import Path
 from typing import Any, Callable, TextIO
 
 from harness.client import HarnessClient
 from harness.config import PROJECT_ROOT, HarnessConfig
+from harness.trace import TraceRecorder
 from harness.tools.discovery import Discovery
 from harness.tools.file_store import DEFAULT_MAX_DEPTH
 from harness.tools.memory_context import MemoryContextReader
@@ -82,27 +89,67 @@ def get_canonical_user_state_dir() -> Path:
     return base / "jarvis-app" / "memory"
 
 
+# canonical JARVIS state 파일 — <memory_dir> 아래 고정 관례 경로.
+# 각 항목은 아래 모듈의 default_* 헬퍼가 같은 경로를 사용한다.
+#   projects.md / tasks.md      — memory_context / task_store
+#   workspace_roots.json         — workspace_roots
+#   project_workspaces.json      — project_workspaces
+#   resource_links.json          — resource_links (Task↔File 연결, M2)
+#   file_refs.json               — workspace (FileRef identity)
+#   page_identity.json           — page_store (pages/의 형제)
+STATE_FILES: tuple[str, ...] = (
+    "projects.md",
+    "tasks.md",
+    "workspace_roots.json",
+    "project_workspaces.json",
+    "resource_links.json",
+    "file_refs.json",
+    "page_identity.json",
+)
+
+# canonical 디렉터리 — pages/ (Knowledge Markdown). 디렉터리도 file 단위로
+# copy-if-absent 하므로 사용자가 일부 페이지를 이미 갖고 있어도 나머지는 온다.
+STATE_DIRS: tuple[str, ...] = ("pages",)
+
+
 def migrate_scratch_to_user_state(
     scratch_dir: Path, user_state_dir: Path
 ) -> list[str]:
-    """scratch에 존재하는 초기 상태(projects.md, tasks.md, workspace_roots.json 등)를
-    사용자 state 디렉터리로 안전하게 최초 마이그레이션(copy-if-absent)한다.
-    이미 존재하는 사용자 파일은 절대 덮어쓰지 않는다.
-    반환: 복사된 파일명 리스트
+    """scratch의 초기 상태를 사용자 state 디렉터리로 안전하게 최초 마이그레이션한다.
+
+    copy-if-absent: 이미 존재하는 사용자 파일은 절대 덮어쓰지 않는다. 연결
+    (resource_links)·파일 identity(file_refs)·페이지(pages)까지 포함하므로,
+    스크래치에서 만든 사용자의 작업 맥락이 영구 상태로 유실되지 않는다.
+
+    반환: 상대 경로 리스트 (파일은 이름, 디렉터리는 "pages/파일명" 형태)
     """
     if not scratch_dir.is_dir():
         return []
     migrated: list[str] = []
     user_state_dir.mkdir(parents=True, exist_ok=True)
-    # 복사 대상: md 파일들 및 핵심 json 설정
-    candidates = ["projects.md", "tasks.md", "workspace_roots.json", "project_workspaces.json"]
-    for name in candidates:
+
+    for name in STATE_FILES:
         src = scratch_dir / name
         dst = user_state_dir / name
         if src.is_file() and not dst.exists():
-            import shutil
             shutil.copy2(src, dst)
             migrated.append(name)
+
+    for name in STATE_DIRS:
+        src_root = scratch_dir / name
+        if not src_root.is_dir():
+            continue
+        for src in sorted(src_root.rglob("*")):
+            if not src.is_file():
+                continue
+            relative = src.relative_to(scratch_dir)
+            dst = user_state_dir / relative
+            if dst.exists():
+                continue
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
+            migrated.append(relative.as_posix())
+
     return migrated
 
 
@@ -340,6 +387,24 @@ def _update_task(
             "error": f"{type(exc).__name__}: {exc}",
         }
 
+    # M5 — 세션 연속성 신호 (관찰 전용).
+    _record_activity(
+        client,
+        project_id=project_id,
+        operation="update_task",
+        arguments={
+            "project_id": project_id,
+            "task_id": task_id,
+            "done": bool(done),
+        },
+        summary=(
+            f"작업 완료 처리: {result.get('title') or task_id}"
+            if done
+            else f"작업 다시 열기: {result.get('title') or task_id}"
+        ),
+        active_file=_active_file_context(payload),
+    )
+
     return {
         "type": "response",
         "id": request_id,
@@ -391,6 +456,16 @@ def _delete_task(
             "status": "error",
             "error": f"{type(exc).__name__}: {exc}",
         }
+
+    # M5 — 세션 연속성 신호 (관찰 전용).
+    _record_activity(
+        client,
+        project_id=project_id,
+        operation="delete_task",
+        arguments={"project_id": project_id, "task_id": task_id},
+        summary=f"작업 삭제: {result.get('title') or task_id}",
+        active_file=_active_file_context(payload),
+    )
 
     return {
         "type": "response",
@@ -444,6 +519,20 @@ def _create_task(
             "status": "error",
             "error": f"{type(exc).__name__}: {exc}",
         }
+
+    # M5 — 생성된 task_id까지 신호에 남겨야 복귀 시 방금 만든 작업이 이어진다.
+    _record_activity(
+        client,
+        project_id=project_id,
+        operation="create_task",
+        arguments={
+            "project_id": project_id,
+            "task_id": result.get("id"),
+            "title": result.get("title"),
+        },
+        summary=f"새 작업 추가: {result.get('title') or result.get('id')}",
+        active_file=_active_file_context(payload),
+    )
 
     return {
         "type": "response",
@@ -735,6 +824,20 @@ def _link_task_file(
         return _err(request_id, str(exc))
     except Exception as exc:
         return _err(request_id, f"{type(exc).__name__}: {exc}")
+    # M5 — 명시적 link도 세션 신호. 파일 위치까지 남겨 복귀 시 그 자료로 이어가게 한다.
+    _record_activity(
+        client,
+        project_id=_project_of_task(client, task_id),
+        operation="link_task_file",
+        arguments={
+            "task_id": task_id.strip(),
+            "file_id": file_id.strip(),
+            "relation": relation.strip(),
+            **_file_signal(client, file_id),
+        },
+        summary=f"작업에 자료 연결: {task_id.strip()}",
+        active_file=_active_file_context(payload),
+    )
     return _ok(request_id, client, created=result["created"], link=result["link"])
 
 
@@ -771,6 +874,22 @@ def _unlink_task_file(
         result = resources.unlink_task_file(link_id.strip())
     except ResourceLinkError as exc:
         return _err(request_id, str(exc))
+    # M5 — 해제된 링크의 task/file은 제거된 link 사본에서 되찾는다.
+    removed = result.get("link") or {}
+    task_id = removed.get("from_id")
+    file_id = removed.get("to_id")
+    _record_activity(
+        client,
+        project_id=_project_of_task(client, task_id),
+        operation="unlink_task_file",
+        arguments={
+            "task_id": task_id,
+            "file_id": file_id,
+            **_file_signal(client, file_id),
+        },
+        summary=f"작업 자료 연결 해제: {task_id}",
+        active_file=_active_file_context(payload),
+    )
     return _ok(request_id, client, removed=result["removed"], link=result["link"])
 
 
@@ -1232,6 +1351,86 @@ def _active_file_context(msg: dict[str, Any]) -> dict[str, str] | None:
     if not fields.get("root_id") or not fields.get("path"):
         return None
     return fields
+
+
+# ---------- Session activity trace (M5) ----------
+
+def _project_of_task(client: HarnessClient, task_id: Any) -> str | None:
+    """task_id가 속한 project_id를 canonical 상태에서 찾는다 (역조회).
+
+    link/unlink 메시지는 task_id만 받고 project_id를 받지 않는다. 복귀 브리핑은
+    프로젝트 단위로 trace를 필터링하므로 여기서 project_id를 알아내야 한다.
+    """
+    if not isinstance(task_id, str) or not task_id.strip():
+        return None
+    memory_dir = client.config.memory_dir
+    if memory_dir is None or not Path(memory_dir).is_dir():
+        return None
+    task_file = client.config.task_file or (Path(memory_dir) / "tasks.md")
+    try:
+        store = TaskStore(task_file, memory_dir=memory_dir)
+        for project in MemoryContextReader(Path(memory_dir)).list_projects():
+            for task in store.list_tasks(project["id"]):
+                if task.get("id") == task_id.strip():
+                    return project["id"]
+    except (FileNotFoundError, OSError, ValueError):
+        return None
+    return None
+
+
+def _file_signal(client: HarnessClient, file_id: Any) -> dict[str, Any]:
+    """FileRef id → 복귀 매칭용 파일 신호(path/name).
+
+    resolve_briefing은 파일 '경로'로 세션 신호와 task 링크를 잇는다. FileRef id만
+    남기면 매칭할 수 없으므로 canonical locator를 그대로 가져온다. 결정할 수 없으면
+    빈 dict — 신호를 지어내지 않는다.
+    """
+    if not isinstance(file_id, str) or not file_id.strip():
+        return {}
+    workspace = _workspace(client)
+    if workspace is None:
+        return {}
+    ref = workspace.registry.by_id(file_id.strip())
+    if ref is None:
+        return {}
+    signal: dict[str, Any] = {}
+    if ref.relative_path:
+        signal["path"] = ref.relative_path
+    if ref.name:
+        signal["name"] = ref.name
+    return signal
+
+
+def _record_activity(
+    client: HarnessClient,
+    *,
+    project_id: Any,
+    operation: str,
+    arguments: dict[str, Any],
+    summary: str,
+    active_file: dict[str, Any] | None = None,
+) -> None:
+    """deterministic 작업(create/edit/done/delete, link/unlink)을 trace에 기록.
+
+    이 작업들은 모델 tool loop를 거치지 않아 기존 trace에 남지 않았고, 그 결과
+    복귀 브리핑의 세션 신호(touched_task_ids)가 런타임에 항상 비어 있었다.
+    관찰 전용 부수효과이며, 실패해도 canonical 작업 결과를 막지 않는다.
+    """
+    if not isinstance(project_id, str) or not project_id.strip():
+        return
+    if not client.config.trace_enabled:
+        return
+    try:
+        TraceRecorder(client.config.trace_dir).record_activity(
+            project_id=project_id.strip(),
+            operation=operation,
+            arguments=arguments,
+            summary=summary,
+            active_file=active_file,
+        )
+    except (OSError, TypeError, ValueError):
+        # 기록은 부수효과 — 절대 사용자 작업을 막지 않는다.
+        return
 
 
 def handle_message(

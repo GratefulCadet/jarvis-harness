@@ -267,19 +267,23 @@ SYSTEM MAP
 
 ## Current development data
 
-The verified integration source is currently:
+The runtime resolves its memory directory in this order:
 
-```text
-data/electron_scratch/
-├─ projects.md
-└─ tasks.md
-```
+1. `JARVIS_STATE_DIR` / `JARVIS_BRIDGE_MEMORY_DIR` — explicit override
+2. `JARVIS_USE_SCRATCH=1` — forces isolated scratch (tests/smoke only)
+3. default: the canonical **user** state directory
+   - Windows: `%APPDATA%/jarvis-app/memory`
+   - Linux/macOS: `~/.config/jarvis-app/memory` (or `XDG_CONFIG_HOME`)
 
-This is **SCRATCH / DEVELOPMENT DATA**.
+`data/electron_scratch/` is **SCRATCH / DEVELOPMENT DATA** and is no longer
+the runtime default. It exists for isolated testing and as a first-run
+migration source only.
 
-Do not call it the user's real canonical JARVIS state.
-
-Before production use, the actual user-state location must be explicitly discovered and selected.
+On first run against the canonical directory, existing scratch state is copied
+in **copy-if-absent** fashion (`migrate_scratch_to_user_state`): `projects.md`,
+`tasks.md`, `workspace_roots.json`, `project_workspaces.json`,
+`resource_links.json`, `file_refs.json`, `page_identity.json`, and the `pages/`
+tree. Files already present in the user directory are never overwritten.
 
 ## Relevant checkpoints
 
@@ -908,16 +912,27 @@ If a result is partially verified, label it that way.
 
 As of the current checkpoint, these are not solved:
 
-- production REAL USER-state location is not yet established
-- current verified Project/Task integration is based on `electron_scratch`
 - Goal persistence model is not finalized
-- Next Action representation is not finalized
+- Next Action representation is not finalized (still derived + transient)
 - hierarchical Markdown Pages are not implemented
 - arbitrary file access is not implemented
 - Page → Page recursive hierarchy is not implemented
-- Tree Add/Edit/Delete is not yet guaranteed to use canonical persistence
-- automatic Tree refresh after arbitrary Harness writes is not yet guaranteed
 - unified Knowledge + Execution read model is not yet implemented
+- automatic Tree refresh after **model-initiated** Harness writes is not
+  guaranteed — Tree-originated Add/Edit/Delete re-snapshot from canonical state
+  after success, but there is no bridge-event subscription, so a task created by
+  Qwen through the tool loop does not refresh the Tree until a manual refresh
+- end-to-end resume flow has not been verified through the real Electron GUI
+  (verified through the bridge/Python path only)
+
+Settled since this list was first written — do not report these as open:
+
+- production REAL USER-state location **is** established and resolved at runtime
+  (§4 Current development data)
+- Project/Task integration is **not** based on `electron_scratch`; the canonical
+  user directory is the default and scratch is opt-in via `JARVIS_USE_SCRATCH`
+- Tree Add/Edit/Delete writes canonical state through `TaskStore` as single writer
+  (`create_task` / `update_task` / `delete_task` bridge messages)
 
 Treat this section as a dated implementation snapshot.
 

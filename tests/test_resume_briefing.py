@@ -549,3 +549,196 @@ class ResumeBriefingNextActionQualityTests(unittest.TestCase):
         next_action = result.data["next_action"]
         self.assertEqual(next_action["task_id"], "t-open1")
         self.assertEqual(next_action["basis"], "미완료 task 중 목록 순서 첫 번째")
+
+
+class ResumeBriefingLiveSessionSignalTests(unittest.TestCase):
+    """M5: 실제 bridge 작업이 만든 trace로 복귀 브리핑이 이어지는지 검증.
+
+    M1–M4 테스트는 trace를 손으로 만들어 넣었다. 실제로는 task 생성/수정/완료와
+    link가 모델 tool loop를 거치지 않아 trace에 남지 않았고, 그래서
+    touched_task_ids가 항상 비어 있었다. 이 테스트는 fixture로 trace를 주입하지
+    않고 실제 bridge 핸들러를 호출한 뒤, 같은 trace 디렉터리에서 resume_briefing이
+    그 신호를 읽는지 확인한다.
+    """
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.fixture = _build_fixture(Path(self.tmp.name))
+        self.session = BridgeSession()
+        config = HarnessConfig(
+            runtime="mock",
+            memory_dir=self.fixture["mem"],
+            task_file=self.fixture["mem"] / "tasks.md",
+            trace_dir=self.fixture["traces"],
+            file_roots={"workspace": str(self.fixture["workspace"])},
+            trace_enabled=True,
+        )
+        self.client = HarnessClient(config)
+        self.registry = _make_registry(self.fixture)
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def _handle(self, msg: dict) -> dict:
+        return handle_message(self.client, self.session, msg)
+
+    def _brief(self) -> dict:
+        result = self.registry.execute("resume_briefing", {"query": "졸업논문"})
+        self.assertTrue(result.ok, result.error)
+        return result.data
+
+    def test_update_task_records_trace_and_drives_next_action(self) -> None:
+        """실제 update_task 호출 → trace 생성 → 복귀 시 그 task가 이어진다."""
+        # t-open1이 목록 첫 번째지만 사용자는 t-open2를 마지막으로 다뤘다.
+        response = self._handle({
+            "type": "update_task",
+            "id": "r1",
+            "project_id": "graduation-thesis",
+            "task_id": "t-open2",
+            "title": "논문 초안 개요 작성 — 3장 구조 잡기",
+        })
+        self.assertEqual(response["status"], "ok")
+
+        traces = list(self.fixture["traces"].glob("*.json"))
+        self.assertEqual(len(traces), 1, "update_task이 trace를 남겨야 한다")
+        entry = json.loads(traces[0].read_text(encoding="utf-8"))
+        self.assertEqual(
+            entry["request"]["metadata"]["project_id"], "graduation-thesis"
+        )
+        self.assertEqual(
+            entry["tool_results"][0]["call"]["arguments"]["task_id"], "t-open2"
+        )
+
+        data = self._brief()
+        self.assertEqual(data["next_action"]["task_id"], "t-open2")
+        self.assertEqual(data["next_action"]["basis"], "최근 세션에서 진행 중이던 작업")
+
+    def test_create_task_records_new_task_id_for_next_resume(self) -> None:
+        """실제 create_task는 생성된 task_id를 남겨 방금 만든 작업이 이어진다."""
+        response = self._handle({
+            "type": "create_task",
+            "id": "r2",
+            "project_id": "graduation-thesis",
+            "title": "표지 페이지 작성",
+        })
+        self.assertEqual(response["status"], "ok")
+        new_id = response["task"]["id"]
+
+        data = self._brief()
+        self.assertEqual(data["next_action"]["task_id"], new_id)
+        self.assertEqual(data["next_action"]["title"], "표지 페이지 작성")
+
+    def test_completing_a_task_does_not_propose_it_as_next_action(self) -> None:
+        """완료한 작업은 미완료 목록에 없으므로 다음 행동으로 제안되지 않는다."""
+        self._handle({
+            "type": "update_task",
+            "id": "r3",
+            "project_id": "graduation-thesis",
+            "task_id": "t-open1",
+            "done": True,
+        })
+        data = self._brief()
+        self.assertNotEqual(data["next_action"]["task_id"], "t-open1")
+        self.assertEqual(data["next_action"]["task_id"], "t-open2")
+
+    def test_activity_trace_is_not_reported_as_user_intent(self) -> None:
+        """시스템 작업 기록은 최근 활동으로 보이지만 사용자 발화로 승격되지 않는다."""
+        self._handle({
+            "type": "create_task",
+            "id": "r4",
+            "project_id": "graduation-thesis",
+            "title": "결론 장 개요",
+        })
+        data = self._brief()
+        self.assertTrue(data["last_activity"])
+        self.assertEqual(data["last_activity"][0]["kind"], "system")
+        self.assertNotIn("결론 장 개요", (data["notes"] or []))
+
+    def test_link_task_file_records_file_signal_for_real_link(self) -> None:
+        """실제 link_task_file이 파일 경로까지 남겨 파일 연결 task로 이어진다."""
+        mem = self.fixture["mem"]
+        workspace = WorkspaceManager(
+            FileStore({"workspace": str(self.fixture["workspace"])}),
+            default_registry_file(mem),
+        )
+        workspace.scan_root()
+        ref = workspace.registry.by_path("workspace", "graduation/paper.txt")
+        self.assertIsNotNone(ref)
+
+        response = self._handle({
+            "type": "link_task_file",
+            "id": "r5",
+            "task_id": "t-open2",
+            "file_id": ref.id,
+            "relation": "reference",
+        })
+        self.assertEqual(response["status"], "ok")
+
+        # link는 task_id를 함께 남기므로 직접 다룬 task로 우선 매칭된다.
+        # 파일 신호까지 남았는지도 확인한다 — 그래야 파일 기반 매칭 경로가
+        # 실제 런타임에 존재한다.
+        entry = json.loads(
+            next(self.fixture["traces"].glob("*.json")).read_text(encoding="utf-8")
+        )
+        arguments = entry["tool_results"][0]["call"]["arguments"]
+        self.assertEqual(arguments["path"], "graduation/paper.txt")
+        self.assertEqual(arguments["name"], "paper.txt")
+        self.assertEqual(
+            entry["request"]["metadata"]["project_id"], "graduation-thesis"
+        )
+
+        data = self._brief()
+        self.assertEqual(data["next_action"]["task_id"], "t-open2")
+        self.assertEqual(
+            next(
+                (r["file"]["name"] for r in data["next_action"]["resources"]),
+                None,
+            ),
+            "paper.txt",
+        )
+
+    def test_active_file_context_is_recorded_when_bridge_sends_it(self) -> None:
+        """렌더러가 보낸 active_file이 있으면 그 파일도 세션 신호로 남는다."""
+        self._handle({
+            "type": "update_task",
+            "id": "r6",
+            "project_id": "graduation-thesis",
+            "task_id": "t-open2",
+            "done": False,
+            "active_file": {
+                "root_id": "workspace",
+                "path": "graduation/paper.txt",
+                "name": "paper.txt",
+                # 이 필드는 신뢰하지 않으며 기록되지 않아야 한다.
+                "content": "secret file body",
+            },
+        })
+        entry = json.loads(
+            next(self.fixture["traces"].glob("*.json")).read_text(encoding="utf-8")
+        )
+        active_file = entry["request"]["metadata"]["active_file"]
+        self.assertEqual(active_file["path"], "graduation/paper.txt")
+        self.assertEqual(active_file["name"], "paper.txt")
+        self.assertNotIn("content", active_file)
+
+    def test_unresolvable_link_does_not_match_every_touched_file(self) -> None:
+        """파일명이 비어 있는 링크는 어떤 touched file과도 매칭되지 않는다 (M5 수정).
+
+        이전 구현은 빈 fpath에 대해 endswith('')가 항상 참이어서, resolve 실패한
+        링크 하나만 있어도 임의의 파일이 그 task로 매칭되었다.
+        """
+        from harness.tools.resume_briefing import _file_matches
+
+        self.assertFalse(_file_matches("src/anything.py", "", ""))
+        self.assertFalse(_file_matches("", "paper.txt", "graduation/paper.txt"))
+        # 실제로 같은 파일인 경우는 계속 매칭된다.
+        self.assertTrue(
+            _file_matches("graduation/paper.txt", "paper.txt", "graduation/paper.txt")
+        )
+        self.assertTrue(
+            _file_matches("C:/ws/graduation/paper.txt", "paper.txt", "graduation/paper.txt")
+        )
+        # 다른 파일은 매칭되지 않는다.
+        self.assertFalse(
+            _file_matches("graduation/notes.md", "paper.txt", "graduation/paper.txt")
+        )

@@ -83,3 +83,57 @@ class TraceRecorder:
         )
         path.write_text(json.dumps(entry, ensure_ascii=False, indent=2), encoding="utf-8")
         return path
+
+    def record_activity(
+        self,
+        *,
+        project_id: str,
+        operation: str,
+        arguments: dict[str, Any],
+        summary: str,
+        active_file: dict[str, Any] | None = None,
+    ) -> Path | None:
+        """모델을 거치지 않은 deterministic 작업의 세션 신호를 같은 형태로 기록 (M5).
+
+        bridge의 task create/edit/done/delete와 task↔file link/unlink은 모델 tool
+        loop를 통하지 않으므로 기존 trace에 남지 않았다. 그 결과 복귀 브리핑의
+        touched_task_ids가 실제로는 항상 비어 있었다. 여기서는 record()와 동일한
+        entry 모양으로 기록해 세션 연속성 신호가 런타임에 실제로 존재하게 한다.
+
+        작업 결과 자체는 남기지 않는다 — 대상 식별자와 요약만 기록한다.
+        metadata.activity가 있으면 이 entry는 사용자 발화가 아니라 시스템 작업이다.
+        """
+        metadata: dict[str, Any] = {
+            "source": "electron_bridge",
+            "project_id": project_id,
+            "activity": operation,
+        }
+        if active_file:
+            metadata["active_file"] = active_file
+
+        request = ChatRequest(
+            messages=[{"role": "user", "content": summary}],
+            metadata=metadata,
+        )
+        response = ChatResponse(content=summary)
+        return self.record(
+            request,
+            response,
+            0,
+            tool_results=[
+                {
+                    "call": {
+                        "id": f"activity_{operation}",
+                        "name": operation,
+                        "arguments": dict(arguments),
+                    },
+                    "result": {
+                        "ok": True,
+                        "data": {},
+                        "error": None,
+                        "requires_confirmation": False,
+                    },
+                }
+            ],
+            turns=1,
+        )

@@ -104,6 +104,10 @@ def _recent_activity(
 
         # user message text
         user_msg = ""
+        # M5 — metadata.activity가 있는 entry는 bridge가 기록한 deterministic
+        # 작업이다(사용자 발화가 아님). 요약은 보여주되 last_user_intent로
+        # 승격하지 않는다 — 실제 사용자가 한 말만 남는다.
+        is_activity = bool(metadata.get("activity"))
         for m in req.get("messages") or []:
             if m.get("role") == "user":
                 content = m.get("content")
@@ -111,6 +115,8 @@ def _recent_activity(
                     # 시스템 지시성 프롬프트 ("The internal reads above...") 제외
                     if not content.startswith("The internal reads above"):
                         user_msg = content.strip()
+        if is_activity:
+            user_msg = ""
 
         response = entry.get("response") or {}
         entries.append({
@@ -121,6 +127,7 @@ def _recent_activity(
             "_task_ids": entry_task_ids,
             "_files": entry_files,
             "_user_msg": user_msg,
+            "_is_activity": is_activity,
         })
 
     entries.sort(key=lambda item: str(item.get("ts") or ""), reverse=True)
@@ -142,6 +149,7 @@ def _recent_activity(
             "turns": e.get("turns"),
             "tools_used": e.get("tools_used"),
             "summary": e.get("summary"),
+            "kind": "system" if e.get("_is_activity") else "conversation",
         }
         for e in entries[:_MAX_ACTIVITY]
     ]
@@ -152,6 +160,40 @@ def _recent_activity(
         "last_user_intent": last_user_intent,
     }
     return activity_out, session_signals
+
+
+def _norm_locator(value: Any) -> str:
+    """파일 위치 비교용 정규화 — 백슬래시를 슬래시로 통일하고 끝 슬래시를 뺀다."""
+    text = str(value or "").strip().replace("\\", "/")
+    while "//" in text:
+        text = text.replace("//", "/")
+    return text.rstrip("/")
+
+
+def _file_matches(touched: str, name: str, path: str) -> bool:
+    """세션에서 다룬 파일인지 판정 — 빈 값은 절대 매칭하지 않는다.
+
+    이전 구현은 `tf.endswith(fpath)`를 그대로 썼는데, fpath가 빈 문자열이면
+    모든 문자열이 접미사 일치로 통과했다. resolve 실패한 링크(파일명이 빈 항목)가
+    하나만 있어도 임의의 touched file이 그 task로 매칭되었다.
+    """
+    touched_norm = _norm_locator(touched)
+    if not touched_norm:
+        return False
+    candidates = [c for c in (_norm_locator(name), _norm_locator(path)) if c]
+    for candidate in candidates:
+        if touched_norm == candidate:
+            return True
+        # 경로가 다를 수 있어(상대 vs 절대) 끝부분 일치를 허용하되
+        # 빈 문자열은 후보에서 이미 제거했다.
+        if candidate and touched_norm.endswith("/" + candidate.lstrip("/")):
+            return True
+        if candidate and candidate.endswith("/" + touched_norm.lstrip("/")):
+            return True
+        # 파일명 단위 비교 — 경로가 전혀 같지 않아도 같은 파일일 수 있다.
+        if candidate.rsplit("/", 1)[-1] == touched_norm.rsplit("/", 1)[-1]:
+            return True
+    return False
 
 
 def _select_next_action(
@@ -194,14 +236,16 @@ def _select_next_action(
                 fname = file_info.get("name") or ""
                 fpath = file_info.get("path") or ""
                 for tf in touched_files:
-                    if tf and (tf == fname or tf == fpath or tf.endswith(fpath) or fpath.endswith(tf)):
-                        return {
-                            "task_id": task["id"],
-                            "title": task.get("title", ""),
-                            "reason": task.get("reason", ""),
-                            "basis": f"최근 세션 작업 파일({fname or fpath})과 연결된 작업",
-                            "resources": entries,
-                        }
+                    if not _file_matches(tf, fname, fpath):
+                        continue
+                    label = fname or fpath
+                    return {
+                        "task_id": task["id"],
+                        "title": task.get("title", ""),
+                        "reason": task.get("reason", ""),
+                        "basis": f"최근 세션 작업 파일({label})과 연결된 작업",
+                        "resources": entries,
+                    }
 
     # 3. 폴백: 첫 번째 미완료 task
     task = open_tasks[0]

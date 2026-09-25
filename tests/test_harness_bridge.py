@@ -112,6 +112,108 @@ class ResolveMemoryDirTests(unittest.TestCase):
             self.assertEqual((u_path / "projects.md").read_text(encoding="utf-8"), "# Scratch Projects")
             self.assertEqual((u_path / "tasks.md").read_text(encoding="utf-8"), "# User Existing Tasks")
 
+    def test_migration_carries_links_file_refs_and_pages(self) -> None:
+        """M6 — 연결·파일 identity·페이지도 영구 상태로 넘어간다.
+
+        이게 빠지면 스크래치에서 만든 Task↔File 연결이 조용히 사라진다 —
+        복귀 브리핑이 "연결된 파일 없음"으로 보고하게 된다.
+        """
+        from scripts.harness_bridge import migrate_scratch_to_user_state
+
+        with tempfile.TemporaryDirectory() as scratch_tmp, tempfile.TemporaryDirectory() as user_tmp:
+            s_path, u_path = Path(scratch_tmp), Path(user_tmp)
+
+            (s_path / "projects.md").write_text("# Projects", encoding="utf-8")
+            (s_path / "tasks.md").write_text("# Tasks", encoding="utf-8")
+            (s_path / "resource_links.json").write_text(
+                '{"links": [{"id": "l1"}]}', encoding="utf-8"
+            )
+            (s_path / "file_refs.json").write_text(
+                '{"refs": {"f-abc": {"name": "paper.txt"}}}', encoding="utf-8"
+            )
+            (s_path / "page_identity.json").write_text(
+                '{"pages": {}}', encoding="utf-8"
+            )
+            # pages/는 하위 구조를 갖는다 — 재귀 복사되어야 한다.
+            (s_path / "pages" / "thesis").mkdir(parents=True)
+            (s_path / "pages" / "index.md").write_text("index", encoding="utf-8")
+            (s_path / "pages" / "thesis" / "intro.md").write_text("intro", encoding="utf-8")
+
+            migrated = migrate_scratch_to_user_state(s_path, u_path)
+
+            for name in (
+                "projects.md",
+                "tasks.md",
+                "resource_links.json",
+                "file_refs.json",
+                "page_identity.json",
+            ):
+                self.assertIn(name, migrated)
+                self.assertTrue((u_path / name).is_file(), f"{name} 미이관")
+
+            self.assertIn("pages/index.md", migrated)
+            self.assertIn("pages/thesis/intro.md", migrated)
+            self.assertEqual(
+                (u_path / "pages" / "thesis" / "intro.md").read_text(encoding="utf-8"),
+                "intro",
+            )
+
+    def test_migration_never_overwrites_existing_links_or_pages(self) -> None:
+        """M6 — 사용자가 이미 가진 연결·페이지는 절대 덮어쓰지 않는다."""
+        from scripts.harness_bridge import migrate_scratch_to_user_state
+
+        with tempfile.TemporaryDirectory() as scratch_tmp, tempfile.TemporaryDirectory() as user_tmp:
+            s_path, u_path = Path(scratch_tmp), Path(user_tmp)
+
+            (s_path / "resource_links.json").write_text('{"scratch": true}', encoding="utf-8")
+            (s_path / "pages").mkdir()
+            (s_path / "pages" / "a.md").write_text("scratch a", encoding="utf-8")
+            (s_path / "pages" / "b.md").write_text("scratch b", encoding="utf-8")
+
+            (u_path / "resource_links.json").write_text('{"user": true}', encoding="utf-8")
+            (u_path / "pages").mkdir()
+            (u_path / "pages" / "a.md").write_text("user a", encoding="utf-8")
+
+            migrated = migrate_scratch_to_user_state(s_path, u_path)
+
+            # 기존 파일 유지, 없는 것만 추가
+            self.assertNotIn("resource_links.json", migrated)
+            self.assertEqual(
+                (u_path / "resource_links.json").read_text(encoding="utf-8"), '{"user": true}'
+            )
+            self.assertNotIn("pages/a.md", migrated)
+            self.assertEqual((u_path / "pages" / "a.md").read_text(encoding="utf-8"), "user a")
+            self.assertIn("pages/b.md", migrated)
+            self.assertEqual((u_path / "pages" / "b.md").read_text(encoding="utf-8"), "scratch b")
+
+    def test_declared_state_files_match_module_conventions(self) -> None:
+        """M6 — STATE_FILES가 각 모듈의 실제 default 경로와 어긋나지 않는다."""
+        from harness.tools.project_workspaces import default_project_workspaces_file
+        from harness.tools.resource_links import default_links_file
+        from harness.tools.workspace import default_registry_file
+        from harness.tools.workspace_roots import default_workspace_roots_file
+        from scripts.harness_bridge import STATE_FILES, get_canonical_user_state_dir
+
+        memory = get_canonical_user_state_dir()
+        expected = {
+            default_links_file(memory).name,
+            default_registry_file(memory).name,
+            default_workspace_roots_file(memory).name,
+            default_project_workspaces_file(memory).name,
+        }
+        self.assertTrue(
+            expected.issubset(set(STATE_FILES)),
+            f"누락된 canonical 파일: {expected - set(STATE_FILES)}",
+        )
+
+    def test_module_docstring_does_not_claim_scratch_is_default(self) -> None:
+        """M6 — docstring이 M3 이후 상태를 반대로 말하지 않는다."""
+        import scripts.harness_bridge as bridge
+
+        doc = bridge.__doc__ or ""
+        self.assertNotIn("기본 memory_dir는 격리 scratch", doc)
+        self.assertIn("canonical", doc)
+
 
 class HandleMessageTests(unittest.TestCase):
     def setUp(self) -> None:
