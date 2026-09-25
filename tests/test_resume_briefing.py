@@ -19,6 +19,7 @@ from pathlib import Path
 
 from harness.client import HarnessClient
 from harness.config import HarnessConfig
+from harness.trace import TraceRecorder
 from harness.tools import build_default_registry
 from harness.tools.file_store import FileStore
 from harness.tools.resource_links import ProjectResources, default_links_file
@@ -551,6 +552,72 @@ class ResumeBriefingNextActionQualityTests(unittest.TestCase):
         self.assertEqual(next_action["basis"], "미완료 task 중 목록 순서 첫 번째")
 
 
+class _ScriptedToolClient:
+    """모델 응답만 스크립트하고 tool 실행·trace 기록은 실제 코드를 쓰는 client.
+
+    모델(Qwen)이 create_task를 제안하고 사용자가 승인한 상황을 재현한다.
+    제안된 call은 실제 registry로 실행하고, client가 하는 것과 동일한 모양의
+    trace를 TraceRecorder로 기록한다 — 그래야 bridge가 실제로 읽는 events가
+    만들어지고, resume_briefing이 그 trace를 그대로 소비한다.
+    """
+
+    def __init__(self, config, proposals: list[tuple[str, dict]]) -> None:
+        self.config = config
+        self.proposals = list(proposals)
+        self._registry = build_default_registry(
+            memory_dir=config.memory_dir,
+            task_file=config.task_file,
+            file_roots=config.file_roots,
+        )
+        self._trace = TraceRecorder(config.trace_dir, config.trace_enabled)
+
+    @property
+    def tools(self):
+        """실제 client와 동일하게 registry를 노출 — bridge의 프로젝트 문맥 주입이
+        이 fake를 통해서도 실제 코드 경로로 동작하게 한다."""
+        return self._registry
+
+    def chat_with_tools(self, messages, **kwargs):
+        from harness.models import ChatResponse, ToolCall
+
+        confirmed = kwargs.get("confirmed_calls") or []
+        if not confirmed:
+            name, arguments = self.proposals.pop(0)
+            return ChatResponse(
+                content="",
+                tool_calls=[ToolCall(name=name, arguments=arguments, id="call-0")],
+                finish_reason="awaiting_confirmation",
+            )
+
+        # 승인된 call을 실제로 실행하고, 실제 client와 같은 trace를 남긴다.
+        call = confirmed[0]
+        result = self._registry.execute(call["name"], call["arguments"], approve_write=True)
+        tool_results = [{
+            "call": {"id": "call-0", "name": call["name"], "arguments": dict(call["arguments"])},
+            "result": {
+                "ok": result.ok,
+                "data": result.data,
+                "error": result.error,
+                "requires_confirmation": result.requires_confirmation,
+            },
+        }]
+        from harness.models import ChatRequest
+
+        # 실제 client와 동일하게 trace_id를 발급·연결한다. 이게 없으면 bridge의
+        # _trace_info가 trace를 찾지 못해 events가 비어 버린다.
+        trace_id = TraceRecorder.new_trace_id()
+        request = ChatRequest(
+            messages=list(messages),
+            metadata=dict(kwargs.get("metadata") or {}),
+            trace_id=trace_id,
+        )
+        response = ChatResponse(
+            content="작업을 만들었어.", finish_reason="stop", trace_id=trace_id
+        )
+        self._trace.record(request, response, 1, tool_results=tool_results, turns=1)
+        return response
+
+
 class ResumeBriefingLiveSessionSignalTests(unittest.TestCase):
     """M5: 실제 bridge 작업이 만든 trace로 복귀 브리핑이 이어지는지 검증.
 
@@ -696,6 +763,86 @@ class ResumeBriefingLiveSessionSignalTests(unittest.TestCase):
             ),
             "paper.txt",
         )
+
+    def test_model_created_task_is_picked_up_on_resume(self) -> None:
+        """M5 보강 — Qwen이 tool loop으로 만든 task도 복귀 시 이어진다.
+
+        M5는 deterministic bridge 작업만 기록했다. 모델이 create_task를 실행한
+        경로에는 두 가지 문제가 있었다 — confirm metadata에 project_id가 없고,
+        create_task 인자에 task_id가 없다(모델은 생성된 id를 모른다). 그래서
+        복귀 브리핑이 그 trace를 보지 못하고 Qwen이 만든 작업을 이어주지 못했다.
+
+        모델 응답만 스크립트하고, tool 실행과 trace 기록은 실제 코드를 쓴다.
+        """
+        client = _ScriptedToolClient(
+            self.client.config,
+            [("create_task", {
+                "project_id": "graduation-thesis",
+                "title": "모델이 만든 작업",
+                "reason": "복귀 시 이어야 함",
+            })],
+        )
+        response = handle_message(
+            client, self.session,
+            {
+                "type": "chat",
+                "id": "m1",
+                "text": "할 일 하나 만들어줘",
+                "project_id": "graduation-thesis",
+            },
+        )
+        self.assertEqual(response["status"], "awaiting_confirmation")
+        tool_call = response["tool_call"]
+
+        # 승인 → 실제 registry가 create_task를 실행하고 실제 trace에 기록된다.
+        approved = handle_message(
+            client, self.session,
+            {"type": "confirm", "id": "m2", "tool_call": tool_call},
+        )
+        self.assertEqual(approved["status"], "final")
+
+        # 생성된 task는 실제로 canonical state에 있다.
+        tasks_text = (self.fixture["mem"] / "tasks.md").read_text(encoding="utf-8")
+        self.assertIn("모델이 만든 작업", tasks_text)
+
+        # 그리고 복귀 시 그 작업이 이어져야 한다 (t-open1이 목록 첫 번째).
+        data = self._brief()
+        next_action = data["next_action"]
+        self.assertEqual(next_action["title"], "모델이 만든 작업")
+        self.assertEqual(next_action["basis"], "최근 세션에서 진행 중이던 작업")
+        self.assertNotEqual(next_action["task_id"], "t-open1")
+
+    def test_unapproved_model_proposal_does_not_become_resume_signal(self) -> None:
+        """승인하지 않은 제안은 실제 task가 없으므로 이어질 수 없다."""
+        client = _ScriptedToolClient(
+            self.client.config,
+            [("create_task", {
+                "project_id": "graduation-thesis",
+                "title": "거부된 작업",
+                "reason": "승인 안 함",
+            })],
+        )
+        response = handle_message(
+            client, self.session,
+            {
+                "type": "chat",
+                "id": "m1",
+                "text": "할 일 하나 만들어줘",
+                "project_id": "graduation-thesis",
+            },
+        )
+        self.assertEqual(response["status"], "awaiting_confirmation")
+        # 사용자가 거부 → 실행되지 않는다.
+        handle_message(
+            client, self.session,
+            {"type": "reject", "id": "m2", "tool_call": response["tool_call"]},
+        )
+        tasks_text = (self.fixture["mem"] / "tasks.md").read_text(encoding="utf-8")
+        self.assertNotIn("거부된 작업", tasks_text)
+
+        data = self._brief()
+        self.assertNotEqual(data["next_action"]["title"], "거부된 작업")
+        self.assertEqual(data["next_action"]["task_id"], "t-open1")
 
     def test_active_file_context_is_recorded_when_bridge_sends_it(self) -> None:
         """렌더러가 보낸 active_file이 있으면 그 파일도 세션 신호로 남는다."""

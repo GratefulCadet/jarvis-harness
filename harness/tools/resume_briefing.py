@@ -33,6 +33,9 @@ North Star (JARVIS_V4_PRODUCT_DIRECTION.md §1·§15):
 
 _MAX_RESOURCES = 10
 _MAX_TASK_RESOURCE_LOOKUPS = 5
+# 최근 세션에서 직접 다룬 task는 추천 우선순위가 가장 높지만 목록 뒤쪽에 있을 수
+# 있다(방금 만든 task가 대표적). 앞 N개 창에 못 들어가도 자기 자료는 보여야 한다.
+_MAX_TOUCHED_TASK_LOOKUPS = 3
 _MAX_ACTIVITY = 3
 _MAX_COMPLETED = 5
 _SUMMARY_EXCERPT_CHARS = 240
@@ -371,9 +374,19 @@ def build_resume_briefing_tool(
         open_tasks = [t for t in tasks if not t.get("done")]
         completed_tasks = [t for t in tasks if t.get("done")]
 
-        # ---------- 3) 관련 자료 (persisted ResourceLink → 현재 locator resolve) ----------
+        # ---------- 3) 마지막 활동 (이 프로젝트 trace만) ----------
+        # 리소스 조회 대상(최근 다룬 task)을 정하려면 신호가 먼저 필요하므로
+        # 조립 순서만 앞당긴다. 읽는 대상과 결과는 이전과 같다.
+        last_activity, session_signals = _recent_activity(
+            resolved_trace_dir, project["id"]
+        )
+
+        # ---------- 4) 관련 자료 (persisted ResourceLink → 현재 locator resolve) ----------
         # M2 — 자료 연결 정확도: workspace 전체가 아니라 명시적으로 연결된 파일만.
         # task별 귀속을 함께 계산해 "그 작업에 실제 관련된 파일"을 구분한다.
+        # Milestone B — 조회 대상은 "앞 N개"만이 아니라 "추천될 수 있는 task"다.
+        #   방금 만든 task는 목록 끝에 있으므로 앞 창에 못 들어가면, 그 task가
+        #   추천되면서 자기 자료가 빈 것으로 복귀하는 일이 있었다.
         resources: list[dict[str, Any]] = []
         task_entries: dict[str, list[dict[str, Any]]] = {}
         resources_api = discovery.resources
@@ -386,25 +399,29 @@ def build_resume_briefing_tool(
                 project_items = []
             for item in project_items:
                 resources.append(_linked_entry("project", None, item))
-            for task in open_tasks[:_MAX_TASK_RESOURCE_LOOKUPS]:
+
+            open_ids = [task["id"] for task in open_tasks]
+            lookup_ids: list[str] = open_ids[:_MAX_TASK_RESOURCE_LOOKUPS]
+            for tid in (session_signals.get("touched_task_ids") or [])[
+                :_MAX_TOUCHED_TASK_LOOKUPS
+            ]:
+                if tid in open_ids and tid not in lookup_ids:
+                    lookup_ids.append(tid)
+
+            for task_id in lookup_ids:
                 try:
                     task_items = resources_api.list_task_resources(
-                        task["id"]
+                        task_id
                     )["resources"]
                 except Exception:
                     task_items = []
                 collected: list[dict[str, Any]] = []
                 for item in task_items:
-                    entry = _linked_entry("task", task["id"], item)
+                    entry = _linked_entry("task", task_id, item)
                     resources.append(entry)
                     collected.append(entry)
-                task_entries[task["id"]] = collected
+                task_entries[task_id] = collected
         resources = resources[:_MAX_RESOURCES]
-
-        # ---------- 4) 마지막 활동 (이 프로젝트 trace만) ----------
-        last_activity, session_signals = _recent_activity(
-            resolved_trace_dir, project["id"]
-        )
 
         # ---------- 5) 다음 행동 (파생·일시적 — 영속 엔티티 아님, V4 §6) ----------
         # M4 — 세션 히스토리(최근 다룬 task 및 작업 파일)를 활용하여 가장 연결성 높은 작업 추천
