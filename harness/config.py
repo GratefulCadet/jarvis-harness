@@ -82,6 +82,19 @@ class HarnessConfig:
             or tools.get("file_roots")
             or None
         )
+        # 모델 엔드포인트도 같은 방식으로 재정의한다. 앱(GUI) 자동화 검증이
+        # 실제 로컬 모델 서버를 건드리지 않고 격리된 서버를 볼 수 있게 하는
+        # 것이 목적이며, 미설정 시 YAML/기본값을 그대로 쓴다.
+        # (값이 없으면 flat에 None을 넣지 않는다 — dataclass 기본값을 지우지 않기 위해)
+        for env_key, field_name in (
+            ("HARNESS_RUNTIME", "runtime"),
+            ("HARNESS_API_FORMAT", "api_format"),
+            ("HARNESS_BASE_URL", "base_url"),
+            ("HARNESS_MODEL", "model"),
+        ):
+            override = os.environ.get(env_key)
+            if override:
+                flat[field_name] = override
 
         known = {dataclass_field.name for dataclass_field in dataclasses.fields(cls)}
         values = {key: value for key, value in flat.items() if key in known}
