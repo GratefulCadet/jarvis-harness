@@ -302,6 +302,14 @@ def edit_file() -> ToolSchema:
                 "type": "string",
                 "description": "무엇을 바꾸는지 한 줄 설명. 생략 가능.",
             },
+            "instruction": {
+                "type": "string",
+                "description": (
+                    "사용자가 원래 한 요청을 그대로 옮긴 문장. 나중에 사용자가 "
+                    "'다시 계산'을 누르면 이 문장으로 같은 의도를 새 revision에 "
+                    "대해 다시 제안한다. 생략 가능하지만 주면 재계산 품질이 올라간다."
+                ),
+            },
         },
         ["file_id", "path", "content"],
     )

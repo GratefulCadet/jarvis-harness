@@ -1469,6 +1469,73 @@ def _edit_cancel(
     return _ok(request_id, client, proposal=result)
 
 
+def _edit_recalculate(
+    client: HarnessClient,
+    request_id: Any,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """AI Edit V1.1 — 사용자가 '다시 계산'을 누른 뒤의 재계획.
+
+    예전 제안을 다시 적용하는 것이 아니다. (1) 예전 제안의 identity와 원래 요청을
+    꺼내고, (2) 지금 canonical 파일을 다시 읽어 새 base_revision을 잡고,
+    (3) 모델에게 같은 요청으로 새 제안을 만들게 한 뒤, (4) 예전 제안을 명시적
+    terminal 상태로 보낸다. 새 제안은 별개의 proposal_id·base_revision·diff를
+    갖는다.
+    """
+    from harness.tools.edit_proposals import mark_terminal, recalculate_source
+
+    workspace = _workspace(client)
+    if workspace is None:
+        return _err(request_id, "승인된 파일 루트가 없습니다")
+    store = _edit_proposal_store(client)
+
+    try:
+        proposal_id = _require_proposal_id(payload)
+        source = recalculate_source(workspace, store, proposal_id)
+    except Exception as exc:
+        return _err(request_id, str(exc))
+
+    instruction = source["instruction"]
+    prompt = (
+        "다음 요청을 방금 제공한 파일의 현재 내용에 적용해 주세요.\n\n"
+        f"사용자 요청: {instruction}\n\n"
+        f"대상 file_id: {source['file_id']}\n"
+        f"대상 root: {source['root_id']}\n"
+        f"대상 path: {source['relative_path']}\n\n"
+        f"--- 현재 파일({source['relative_path']}) 내용 시작 ---\n"
+        f"{source['latest_content']}\n"
+        "--- 현재 파일 내용 끝 ---\n\n"
+        "반드시 edit_file을 호출하세요. file_id/root/path/instruction 인자는 "
+        "위 값을 그대로 쓰고 content만 수정 후 전체 내용으로 채우세요. "
+        "파일은 아직 수정되지 않았습니다 — 사용자가 diff를 확인하고 승인한 뒤에만 "
+        "적용됩니다."
+    )
+    try:
+        response = client.chat_with_tools(
+            [{"role": "user", "content": prompt}],
+            context=None,
+            metadata={"source": "electron_bridge", "operation": "edit_recalculate"},
+        )
+    except Exception as exc:
+        return _err(request_id, f"다시 계산에 실패했습니다: {exc}")
+
+    trace = _trace_info(client.config, response.trace_id)
+    proposal = _extract_edit_proposal(trace.get("events"))
+    if proposal is None:
+        # 예전 제안은 그대로 둔다 — 재계획이 실패했는데 terminal로 보내면
+        # 사용자가 둘 다 잃는다.
+        return _err(
+            request_id,
+            "다시 계산했지만 새 제안을 만들지 못했습니다. 요청을 다시 입력해 주세요.",
+        )
+    if proposal.get("proposal_id") == proposal_id:
+        return _err(request_id, "새 제안이 생성되지 않았습니다.")
+
+    # 새 제안이 실제로 준비된 뒤에만 예전 제안을 종료한다.
+    mark_terminal(store, proposal_id, "superseded")
+    return _ok(request_id, client, proposal=proposal, superseded=proposal_id)
+
+
 def _disk_list(
     client: HarnessClient,
     request_id: Any,
@@ -1900,6 +1967,9 @@ def handle_message(
 
         if message_type == "edit_undo":
             return _edit_undo(client, request_id, msg)
+
+        if message_type == "edit_recalculate":
+            return _edit_recalculate(client, request_id, msg)
 
         if message_type == "edit_cancel":
             return _edit_cancel(client, request_id, msg)

@@ -22,6 +22,8 @@ from harness.tools.edit_proposals import (
     create_proposal,
     default_edit_proposals_file,
     diff_stats,
+    mark_terminal,
+    recalculate_source,
     undo_proposal,
     unified_diff_lines,
 )
@@ -227,6 +229,112 @@ class EditProposalTest(unittest.TestCase):
         proposal = self.propose("# Notes\nchanged\nkeep\n")
         apply_proposal(self.workspace, self.store, proposal["proposal_id"])
         self.assertEqual(target.read_bytes(), b"# Notes\r\nchanged\r\nkeep\r\n")
+
+    # ---------- recalculate (V1.1) ----------
+    def test_instruction_is_persisted_and_surfaced(self) -> None:
+        proposal = create_proposal(
+            self.workspace, self.store,
+            root_id="scratch", file_id=self.opened()["file_id"],
+            relative_path="experiment-notes.md",
+            after_content="new\n", instruction="결론을 더 짧게 수정해줘",
+        )
+        self.assertEqual(proposal["instruction"], "결론을 더 짧게 수정해줘")
+        self.assertEqual(
+            self.store.get(proposal["proposal_id"])["instruction"],
+            "결론을 더 짧게 수정해줘",
+        )
+
+    def test_recalculate_source_uses_latest_revision(self) -> None:
+        proposal = create_proposal(
+            self.workspace, self.store,
+            root_id="scratch", file_id=self.opened()["file_id"],
+            relative_path="experiment-notes.md",
+            after_content="new\n", instruction="더 짧게",
+        )
+        # 제안 이후 파일이 바뀌었다.
+        (self.root / "experiment-notes.md").write_text("human edit\n", encoding="utf-8")
+        source = recalculate_source(self.workspace, self.store, proposal["proposal_id"])
+        self.assertEqual(source["instruction"], "더 짧게")
+        # 온디스크 바이트 그대로 읽으므로 개행도 원본 그대로다(Windows = CRLF).
+        self.assertEqual(
+            source["latest_content"],
+            (self.root / "experiment-notes.md").read_bytes().decode("utf-8"),
+        )
+        self.assertIn("human edit", source["latest_content"])
+        # 반드시 현재 revision이어야 한다(예전 base_revision이 아니다).
+        current = self.workspace.read_text("scratch", "experiment-notes.md")
+        self.assertEqual(source["latest_revision"], current["revision"])
+        self.assertNotEqual(source["latest_revision"], proposal["base_revision"])
+
+    def test_recalculate_without_instruction_fails(self) -> None:
+        proposal = self.propose("new\n")  # summary만 있고 instruction 없음
+        with self.assertRaises(FileStoreError):
+            recalculate_source(self.workspace, self.store, proposal["proposal_id"])
+
+    def test_recalculate_rejects_deleted_file(self) -> None:
+        proposal = create_proposal(
+            self.workspace, self.store,
+            root_id="scratch", file_id=self.opened()["file_id"],
+            relative_path="experiment-notes.md",
+            after_content="new\n", instruction="더 짧게",
+        )
+        (self.root / "experiment-notes.md").unlink()
+        self.workspace.scan_root("scratch")
+        with self.assertRaises(FileStoreError):
+            recalculate_source(self.workspace, self.store, proposal["proposal_id"])
+
+    def test_recalculate_rejects_moved_file(self) -> None:
+        proposal = create_proposal(
+            self.workspace, self.store,
+            root_id="scratch", file_id=self.opened()["file_id"],
+            relative_path="experiment-notes.md",
+            after_content="new\n", instruction="더 짧게",
+        )
+        (self.root / "experiment-notes.md").rename(self.root / "moved.md")
+        self.workspace.scan_root("scratch")
+        with self.assertRaises(FileStoreError):
+            recalculate_source(self.workspace, self.store, proposal["proposal_id"])
+
+    def test_mark_terminal_moves_proposal_out_of_play(self) -> None:
+        proposal = self.propose("new\n")
+        mark_terminal(self.store, proposal["proposal_id"], "superseded")
+        self.assertEqual(self.store.get(proposal["proposal_id"])["status"], "superseded")
+        with self.assertRaises(FileStoreError):
+            apply_proposal(self.workspace, self.store, proposal["proposal_id"])
+
+    def test_mark_terminal_rejects_unknown_status(self) -> None:
+        proposal = self.propose("new\n")
+        with self.assertRaises(FileStoreError):
+            mark_terminal(self.store, proposal["proposal_id"], "whatever")
+
+    def test_two_store_instances_do_not_clobber_each_other(self) -> None:
+        """서로 다른 인스턴스가 순차적으로 써도 기록이 사라지지 않는다.
+
+        bridge는 tool registry용 저장소와 op 요청마다의 저장소를 따로 만든다.
+        오래 살아 있는 인스턴스가 자기 스냅샷으로 덮어쓰면, 그 사이에 만들어진
+        새 제안이 조용히 사라진다(재계산 직후 새 제안이 증발하던 버그).
+        """
+        first = EditProposalStore(default_edit_proposals_file(self.memory))
+        p1 = self.propose("first\n")  # goes through `self.store` (a third instance)
+
+        # 오래 살아 있는 인스턴스가 먼저 읽고(스냅샷 획득) 새 제안을 만든다.
+        stale_reader = EditProposalStore(default_edit_proposals_file(self.memory))
+        stale_reader.get(p1["proposal_id"])
+
+        p2 = create_proposal(
+            self.workspace, self.store,
+            root_id="scratch", file_id=self.opened()["file_id"],
+            relative_path="experiment-notes.md", after_content="second\n",
+        )
+        # stale_reader가 이전 스냅샷으로 P1만 갱신한다.
+        mark_terminal(first, p1["proposal_id"], "superseded")
+
+        final = EditProposalStore(default_edit_proposals_file(self.memory))
+        self.assertEqual(final.get(p1["proposal_id"])["status"], "superseded")
+        self.assertIsNotNone(
+            final.get(p2["proposal_id"]),
+            "새 제안이 이전 인스턴스에 의해 덮어써짐",
+        )
 
     # ---------- persistence ----------
     def test_proposal_survives_store_reload(self) -> None:

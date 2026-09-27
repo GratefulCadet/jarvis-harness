@@ -143,6 +143,11 @@ class EditProposalStore:
 
     파일시스템이 canonical이다. 이 파일은 제안(아직 적용되지 않은 의도)와
     undo 기록만 보유하고, 언제든 재구성·삭제할 수 있다.
+
+    주의: 이 저장소는 bridge 안에서 여러 인스턴스로 만들어진다(tool registry가
+    하나, bridge op이 요청마다 하나).    인스턴스가 오래 살아 있으면 메모리 스냅샷이
+    늦어지고, 그대로 저장하면 그 사이에 다른 인스턴스가 쓴 기록(예: 재계산이 만든
+    새 제안)을 통째로 덮어쓴다. 그래서 mutating 경로는 반드시 reload()부터 한다.
     """
 
     def __init__(self, path: Path | str) -> None:
@@ -200,8 +205,14 @@ class EditProposalStore:
             return None
         return self._load().get(proposal_id.strip())
 
+    def _fresh(self) -> dict[str, dict[str, Any]]:
+        """쓰기 전에 디스크에서 다시 읽는다 (stale snapshot 방지)."""
+        self.reload()
+        return self._load()
+
     def put(self, record: dict[str, Any]) -> None:
-        self._load()[str(record["proposal_id"])] = record
+        # 다른 인스턴스가 쓴 기록을 잃지 않도록 먼저 디스크와 동기화한다.
+        self._fresh()[str(record["proposal_id"])] = record
         self._save()
 
     def latest_proposed(self, file_id: str | None = None) -> dict[str, Any] | None:
@@ -240,6 +251,7 @@ def public_view(record: dict[str, Any]) -> dict[str, Any]:
         "name": record.get("name"),
         "absolute_path": record.get("absolute_path"),
         "summary": record.get("summary") or "",
+        "instruction": record.get("instruction") or "",
         "base_revision": record.get("base_revision"),
         "revision_after_apply": record.get("revision_after_apply"),
         "status": record.get("status"),
@@ -289,6 +301,7 @@ def create_proposal(
     relative_path: Any,
     after_content: Any,
     summary: str = "",
+    instruction: str = "",
 ) -> dict[str, Any]:
     """승인 대기 중인 편집 제안을 만든다. **canonical 파일은 변경하지 않는다.**
 
@@ -334,6 +347,9 @@ def create_proposal(
             else resolved_path
         ),
         "summary": (summary or "").strip(),
+        # 원래 사용자 요청. 재계산은 이 문장을 다시 쓴다 — renderer가 임의로
+        # 조립한 문장이 아니라 Harness 제안 기록이 authoritative source다.
+        "instruction": (instruction or "").strip(),
         "base_revision": current["revision"],
         "before_content": before_content,
         "after_content": normalized_after,
@@ -476,6 +492,75 @@ def undo_proposal(
     return view
 
 
+TERMINAL_STATUSES = frozenset(
+    {"cancelled", "superseded", "undone", "conflict", "failed"}
+)
+
+
+def mark_terminal(
+    store: EditProposalStore,
+    proposal_id: Any,
+    status: str,
+) -> dict[str, Any]:
+    """제안을 명시적 terminal 상태로 보낸다.
+
+    재계산은 예전 제안을 '그냥 살아 있는 채로' 두지 않는다. 살아 있으면 사용자가
+    Recalculate를 몇 번이고 눌러도 예전 revision을 다시 적용할 위험이 생긴다.
+    """
+    if status not in TERMINAL_STATUSES:
+        raise FileStoreError(f"허용되지 않은 terminal 상태입니다: {status!r}")
+    record = store.get(proposal_id)
+    if record is None:
+        raise FileStoreError("편집 제안을 찾을 수 없습니다")
+    record["status"] = status
+    store.put(record)
+    return record
+
+
+def recalculate_source(
+    workspace: WorkspaceManager,
+    store: EditProposalStore,
+    proposal_id: Any,
+) -> dict[str, Any]:
+    """새 제안을 만들기 위한 입력을 모은다 (아직 쓰지는 않는다).
+
+    대상은 예전 제안이 기억한 identity(root_id·file_id·relative_path)다. 경로
+    문자열을 다시 찾지 않는다 — 파일이 이동/삭제/재매핑되었으면 조용히 다른
+    파일을 고치는 대신 명시적으로 실패한다.
+    """
+    record = store.get(proposal_id)
+    if record is None:
+        raise FileStoreError("편집 제안을 찾을 수 없습니다")
+    instruction = (record.get("instruction") or "").strip()
+    if not instruction:
+        raise FileStoreError(
+            "이 제안에는 원래 요청(instruction)이 저장되어 있지 않아 "
+            "다시 계산할 수 없습니다. 요청을 다시 입력해 주세요."
+        )
+
+    # identity를 현재 FileRef/canonical 파일과 다시 검증한다.
+    resolved_root, resolved_path = _resolve_target(
+        workspace,
+        record.get("root_id"),
+        record.get("file_id"),
+        record.get("relative_path"),
+    )
+    current = workspace.read_text(resolved_root, resolved_path)
+    _, target_path = workspace.store.resolve_path(resolved_root, resolved_path)
+    latest_content = _read_exact_text(target_path)
+
+    return {
+        "proposal_id": record.get("proposal_id"),
+        "root_id": resolved_root,
+        "file_id": str(record["file_id"]).strip(),
+        "relative_path": resolved_path,
+        "name": current.get("name") or Path(resolved_path).name,
+        "instruction": instruction,
+        "latest_content": latest_content,
+        "latest_revision": current["revision"],
+    }
+
+
 def build_edit_proposal_tool(
     workspace: WorkspaceManager,
     store: EditProposalStore,
@@ -507,6 +592,7 @@ def build_edit_proposal_tool(
             relative_path=arguments.get("path"),
             after_content=arguments.get("content"),
             summary=str(arguments.get("summary") or ""),
+            instruction=str(arguments.get("instruction") or ""),
         )
         return {
             "ok": True,
