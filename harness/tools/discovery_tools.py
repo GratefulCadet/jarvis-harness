@@ -226,6 +226,10 @@ def build_file_tools(
                 result["root_id"] = identity["root_id"]
                 if "id" in identity:
                     result["id"] = identity["id"]
+                    # AI Edit V1 — edit_file은 file_id를 받는다. 모델이 read_file
+                    # 결과를 그대로 이어서 넘길 수 있게 같은 값을 별칭으로 실어 둔다
+                    # (기존 `id`는 그대로 둬서 기존 소비자를 깨지 않는다).
+                    result["file_id"] = identity["id"]
             return result
         tools.append(Tool(schema=schema, kind="read", handler=read_handler))
 

@@ -46,6 +46,14 @@ from harness.client import HarnessClient
 from harness.config import PROJECT_ROOT, HarnessConfig
 from harness.trace import TraceRecorder
 from harness.tools.discovery import Discovery
+from harness.tools.edit_proposals import (
+    EditConflictError,
+    EditProposalStore,
+    apply_proposal,
+    cancel_proposal,
+    default_edit_proposals_file,
+    undo_proposal,
+)
 from harness.tools.discovery_tools import build_list_projects_tool
 from harness.tools.file_store import DEFAULT_MAX_DEPTH
 from harness.tools.memory_context import MemoryContextReader
@@ -226,6 +234,27 @@ def _serialize_call(call: Any) -> dict[str, Any]:
     }
 
 
+def _extract_edit_proposal(events: Any) -> dict[str, Any] | None:
+    """trace events에서 가장 최근 edit 제안을 꺼낸다.
+
+    edit_file은 kind="read"라 awaiting_confirmation이 아니라 최종 응답에
+    tool result로 남는다. UI가 diff 카드를 띄울 수 있도록 응답 최상위로 올린다
+    — renderer가 trace를 직접 파싱하지 않게 하기 위함이다.
+    """
+    if not isinstance(events, list):
+        return None
+    found: dict[str, Any] | None = None
+    for event in events:
+        if not isinstance(event, dict) or event.get("name") != "edit_file":
+            continue
+        if not event.get("ok"):
+            continue
+        data = event.get("data")
+        if isinstance(data, dict) and isinstance(data.get("proposal"), dict):
+            found = data["proposal"]
+    return found
+
+
 def _trace_info(config: HarnessConfig, trace_id: str) -> dict[str, Any]:
     if not trace_id or not config.trace_dir.is_dir():
         return {"trace_id": trace_id, "trace_path": None, "events": []}
@@ -262,6 +291,70 @@ def _is_scratch_dir(path: Any) -> bool:
     return str(path).replace("\\", "/").startswith(
         str(PROJECT_ROOT).replace("\\", "/") + "/data/"
     )
+
+
+def _get_resume_briefing(
+    client: HarnessClient,
+    request_id: Any,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """UX Continuity — 앱이 먼저 브리핑을 제시한다 (read-only, 모델 호출 없음).
+
+    모델 도구 resume_briefing와 같은 결정적 조립 결과를 직접 돌려준다.
+    "계속하자"라고 말해야 브리핑이 나오는 구조(사용자 기억 의존)를 없애고,
+    첫 열림 곧 브리핑을 만든다. 상태를 변경하지 않는다.
+    """
+    memory_dir = client.config.memory_dir
+    if memory_dir is None or not Path(memory_dir).is_dir():
+        return {
+            "type": "response",
+            "id": request_id,
+            "status": "error",
+            "error": "memory_dir 미설정 — JARVIS memory 경로가 없습니다",
+        }
+
+    project_id = payload.get("project_id")
+    if not project_id:
+        # 모델 도구와 달리 자동 경로는 인자가 없다 — 첫 Active 프로젝트로
+        # 해소한다. 프로젝트가 아예 없으면 브리핑 없이 조용히 끝낸다.
+        reader = MemoryContextReader(memory_dir)
+        projects = reader.list_projects()
+        if not projects:
+            return {
+                "type": "response",
+                "id": request_id,
+                "status": "ok",
+                "briefing": None,
+                "scratch": _is_scratch_dir(memory_dir),
+            }
+        project_id = projects[0]["id"]
+
+    tool = client.tools.get("resume_briefing")
+    if tool is None or tool.handler is None:
+        return {
+            "type": "response",
+            "id": request_id,
+            "status": "error",
+            "error": "resume_briefing 도구를 사용할 수 없습니다",
+        }
+
+    try:
+        data = tool.handler({"project_id": project_id})
+    except Exception as exc:
+        return {
+            "type": "response",
+            "id": request_id,
+            "status": "error",
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
+    return {
+        "type": "response",
+        "id": request_id,
+        "status": "ok",
+        "briefing": data,
+        "scratch": _is_scratch_dir(memory_dir),
+    }
 
 
 def _tree_snapshot(
@@ -1292,6 +1385,208 @@ def _file_write(
         return _err(request_id, str(exc))
 
 
+def _edit_proposal_store(client: HarnessClient) -> EditProposalStore:
+    """제안 저장소 — bridge의 canonical state 디렉터리에 놓는다."""
+    memory_dir = client.config.memory_dir
+    return EditProposalStore(default_edit_proposals_file(memory_dir))
+
+
+def _require_proposal_id(payload: dict[str, Any]) -> str:
+    proposal_id = payload.get("proposal_id")
+    if not isinstance(proposal_id, str) or not proposal_id.strip():
+        raise ValueError("proposal_id가 필요합니다")
+    return proposal_id.strip()
+
+
+def _edit_apply(
+    client: HarnessClient,
+    request_id: Any,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """AI Edit V1 — 사용자가 diff를 보고 명시적으로 승인한 뒤에만 실행된다.
+
+    revision-safe apply를 수행하고 undo 기록을 남긴다. conflict면 status=conflict로
+    되돌려 파일을 건드리지 않는다(조용한 덮어쓰기 없음).
+    """
+    workspace = _workspace(client)
+    if workspace is None:
+        return _err(request_id, "승인된 파일 루트가 없습니다")
+    store = _edit_proposal_store(client)
+    try:
+        proposal_id = _require_proposal_id(payload)
+        result = apply_proposal(workspace, store, proposal_id)
+    except EditConflictError as exc:
+        return {
+            "type": "response",
+            "id": request_id,
+            "status": "conflict",
+            "error": str(exc),
+        }
+    except Exception as exc:
+        return _err(request_id, str(exc))
+    # public_view는 자기Own 'status'(proposed/applied/...)를 갖는다. **로 펴면
+    # 응답 봉투의 status='ok'을 덮어써 renderer가 결과를 오류로 읽는다.
+    # 그래서 제안은 이름 있는 키 아래에 넣는다(다른 bridge op과 같은 관례).
+    return _ok(request_id, client, proposal=result)
+
+
+def _edit_undo(
+    client: HarnessClient,
+    request_id: Any,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """1단계 되돌리기 — 이후 변경이 있으면 자동 복원하지 않는다."""
+    workspace = _workspace(client)
+    if workspace is None:
+        return _err(request_id, "승인된 파일 루트가 없습니다")
+    store = _edit_proposal_store(client)
+    try:
+        proposal_id = _require_proposal_id(payload)
+        result = undo_proposal(workspace, store, proposal_id)
+    except EditConflictError as exc:
+        return {
+            "type": "response",
+            "id": request_id,
+            "status": "conflict",
+            "error": str(exc),
+        }
+    except Exception as exc:
+        return _err(request_id, str(exc))
+    return _ok(request_id, client, proposal=result)
+
+
+def _edit_cancel(
+    client: HarnessClient,
+    request_id: Any,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """사용자 취소 — 디스크는 이미 건드리지 않았으므로 제안 상태만 정리한다."""
+    store = _edit_proposal_store(client)
+    try:
+        result = cancel_proposal(store, _require_proposal_id(payload))
+    except Exception as exc:
+        return _err(request_id, str(exc))
+    return _ok(request_id, client, proposal=result)
+
+
+def _disk_list(
+    client: HarnessClient,
+    request_id: Any,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """File access 확장 — 컴퓨터 전체의 드라이브/폴더 한 단계 목록. read-only."""
+    from harness.tools.disk_roots import list_disk
+
+    try:
+        result = list_disk(payload.get("path"))
+        return _ok(request_id, client, **result)
+    except Exception as exc:
+        return _err(request_id, str(exc))
+
+
+def _disk_read(
+    client: HarnessClient,
+    request_id: Any,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """File access 확장 — 절대 경로 텍스트 파일 읽기. read-only."""
+    from harness.tools.disk_roots import read_disk_file
+
+    path = payload.get("path")
+    if not isinstance(path, str) or not path.strip():
+        return _err(request_id, "path가 필요합니다")
+    max_chars = payload.get("max_chars")
+    try:
+        result = read_disk_file(path.strip(), max_chars)
+        return _ok(request_id, client, **result)
+    except Exception as exc:
+        return _err(request_id, str(exc))
+
+
+def _file_create(
+    client: HarnessClient,
+    request_id: Any,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """File access 확장 — 승인된 루트 안에 새 텍스트 파일. deterministic write.
+
+    UI(사용자 직접 생성) 경로다. 모델 경로는 create_file write tool(승인 gate)로
+    같은 기능을 수행한다. 덮어쓰기 없음 — 기존 파일이면 실패한다.
+    """
+    from harness.tools.file_store import FileStore, FileStoreError
+    from harness.tools.file_write_tools import MAX_CREATE_BYTES
+
+    workspace = _workspace(client)
+    if workspace is None:
+        return _err(request_id, "승인된 파일 루트가 없습니다 — ⚙ 설정에서 폴더를 먼저 추가하세요")
+    path = payload.get("path")
+    content = payload.get("content")
+    root = payload.get("root")
+    if not isinstance(path, str) or not path.strip():
+        return _err(request_id, "path가 필요합니다")
+    if content is not None and not isinstance(content, str):
+        return _err(request_id, "content는 문자열이어야 합니다")
+    content = content if isinstance(content, str) else ""
+    if len(content.encode("utf-8")) > MAX_CREATE_BYTES:
+        return _err(request_id, f"내용이 너무 큽니다 ({len(content.encode('utf-8'))} bytes)")
+
+    files: FileStore = workspace.store
+    try:
+        root_name, root_path = files.resolve_root(root)
+        rel = path.strip().replace("\\", "/")
+        if rel in ("", "."):
+            return _err(request_id, "파일 이름이 필요합니다")
+        candidate = Path(rel)
+        if candidate.is_absolute() or ":" in rel:
+            return _err(request_id, f"절대 경로는 허용되지 않습니다: {rel!r}")
+        if ".." in candidate.parts:
+            return _err(request_id, f"상위 경로 이동(..)은 허용되지 않습니다: {rel!r}")
+        from harness.tools.file_store import _is_sensitive_name
+
+        if _is_sensitive_name(candidate.name):
+            return _err(request_id, f"민감 파일은 만들 수 없습니다: {candidate.name!r}")
+        target = (root_path / candidate).resolve()
+        resolved_root = root_path.resolve()
+        if target != resolved_root and resolved_root not in target.parents:
+            return _err(request_id, f"루트 밖 경로입니다: {rel!r}")
+        if target.exists():
+            return _err(request_id, f"이미 존재하는 파일입니다: {rel!r}")
+        parent = target.parent
+        if not parent.is_dir():
+            parent.mkdir(parents=True, exist_ok=True)
+        tmp = parent / f".{target.name}.jarvis-create.tmp"
+        try:
+            tmp.write_text(content, encoding="utf-8", newline="")
+            tmp.replace(target)
+        except OSError as exc:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+            return _err(request_id, f"파일을 만들 수 없습니다: {exc}")
+        rel_posix = target.relative_to(files.roots[root_name]).as_posix()
+        workspace.scan_root(root_name)
+        identity = workspace.file_identity(root_name, rel_posix)
+        result = {
+            "ok": True,
+            "root": root_name,
+            "path": rel_posix,
+            "name": target.name,
+            "size": len(content.encode("utf-8")),
+            "created": True,
+        }
+        # 주의: _ok의 **kw가 응답의 "id"(request_id)를 덮어쓴다. FileRef identity는
+        # file_id로 반환한다(_file_write와 동일 규약).
+        if "id" in identity:
+            result["file_id"] = identity["id"]
+            result["root_id"] = identity.get("root_id")
+        return _ok(request_id, client, **result)
+    except FileStoreError as exc:
+        return _err(request_id, str(exc))
+    except Exception as exc:
+        return _err(request_id, str(exc))
+
+
 def _pages_snapshot(
     client: HarnessClient,
     request_id: Any,
@@ -1555,6 +1850,10 @@ def handle_message(
         if message_type == "ping":
             return {"type": "response", "id": request_id, "status": "ok"}
 
+        if message_type == "get_resume_briefing":
+            # read-only — UX Continuity(첫 열림 곧 브리핑). 모델 호출 없음.
+            return _get_resume_briefing(client, request_id, msg)
+
         if message_type == "tree_snapshot":
             # read-only — 실제 JARVIS memory(projects.md + tasks.md)를
             # 단일 원천으로 구조화된 트리 스냅샷으로 반환한다. 모델 호출 없음.
@@ -1593,6 +1892,29 @@ def handle_message(
 
         if message_type == "file_write":
             return _file_write(client, request_id, msg)
+
+        if message_type == "edit_apply":
+            # AI Edit V1 — 사용자가 diff를 보고 승인한 뒤에만 실행되는
+            # revision-safe apply. 모델 경로가 아니라 renderer 클릭 경로다.
+            return _edit_apply(client, request_id, msg)
+
+        if message_type == "edit_undo":
+            return _edit_undo(client, request_id, msg)
+
+        if message_type == "edit_cancel":
+            return _edit_cancel(client, request_id, msg)
+
+        if message_type == "disk_list":
+            # read-only — File access 확장: 전체 디스크 한 단계 탐색. 모델 호출 없음.
+            return _disk_list(client, request_id, msg)
+
+        if message_type == "disk_read":
+            # read-only — File access 확장: 절대 경로 텍스트 읽기. 모델 호출 없음.
+            return _disk_read(client, request_id, msg)
+
+        if message_type == "file_create":
+            # deterministic canonical write — UI 새 파일 생성(승인 루트 한정).
+            return _file_create(client, request_id, msg)
 
         if message_type == "link_project_file":
             # deterministic canonical write — 명시적 사용자 구조 행동(PART F). 모델 호출 없음.
@@ -1743,13 +2065,18 @@ def handle_message(
                 }
 
             if response.finish_reason == "stop":
-                return {
+                final: dict[str, Any] = {
                     "type": "response", "id": request_id,
                     "status": "final",
                     "text": response.content or "",
                     **trace,
                     "scratch": scratch,
                 }
+                # AI Edit V1 — 제안이 있으면 diff를 그대로 실어 보낸다.
+                proposal = _extract_edit_proposal(trace.get("events"))
+                if proposal is not None:
+                    final["proposal"] = proposal
+                return final
 
             return {
                 "type": "response", "id": request_id,

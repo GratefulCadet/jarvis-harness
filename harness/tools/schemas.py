@@ -211,6 +211,102 @@ def read_file() -> ToolSchema:
     )
 
 
+def list_disk() -> ToolSchema:
+    """디스크 전체 탐색 (read — File access 확장, §7)."""
+    return _schema(
+        "list_disk",
+        "컴퓨터의 드라이브 목록 또는 지정한 절대 경로의 폴더·파일 한 단계 목록을 읽기 전용으로 반환한다. 민감 파일(키·자격증명 등)은 이름만 표시되고 내용은 차단된다.",
+        {
+            "path": {
+                "type": "string",
+                "description": "조회할 절대 경로 (생략 시 드라이브 루트 목록). 생략 가능.",
+            },
+        },
+        [],
+    )
+
+
+def read_disk_file() -> ToolSchema:
+    """디스크 전체에서 텍스트 파일 읽기 (read — File access 확장, §7)."""
+    return _schema(
+        "read_disk_file",
+        "절대 경로의 텍스트 파일 내용을 읽기 전용으로 반환한다. 텍스트 확장자·크기 제한이 있고 민감 파일은 차단된다.",
+        {
+            "path": {
+                "type": "string",
+                "description": "읽을 파일의 절대 경로",
+            },
+            "max_chars": {
+                "type": "integer",
+                "description": "최대 반환 문자 수 (기본 8000). 생략 가능.",
+            },
+        },
+        ["path"],
+    )
+
+
+def create_file() -> ToolSchema:
+    """승인된 루트에 새 텍스트 파일 생성 (write — 사용자 확인 필요, §8.4)."""
+    return _schema(
+        "create_file",
+        "승인된 파일 루트 안에 새 텍스트 파일을 만든다. 이미 있는 파일은 덮어쓰지 않고 실패한다. 사용자 승인(확인) 후에만 실행된다.",
+        {
+            "path": {
+                "type": "string",
+                "description": "루트 기준 상대 경로 (새 파일)",
+            },
+            "content": {
+                "type": "string",
+                "description": "파일에 쓸 내용 (생략 시 빈 파일). 생략 가능.",
+            },
+            "root": {
+                "type": "string",
+                "description": "루트 이름 (생략 시 첫 번째 루트). 생략 가능.",
+            },
+        },
+        ["path"],
+    )
+
+
+def edit_file() -> ToolSchema:
+    """기존 텍스트 파일 편집 제안 (read — 승인 전에는 파일을 바꾸지 않는다).
+
+    먼저 read_file로 현재 내용을 확인한 뒤, 수정된 **전체 내용**을 content로
+    넘긴다. 여기서는 diff만 계산해 사용자에게 보여줄 제안을 만든다. 디스크에
+    쓰이는 것은 사용자가 diff를 확인하고 명시적으로 승인한 뒤에만 일어난다.
+    """
+    return _schema(
+        "edit_file",
+        "이미 있는 텍스트 파일의 수정을 제안한다. 반드시 먼저 read_file로 현재 내용을 "
+        "읽은 뒤, 수정된 전체 내용을 content로 전달한다. 이 호출은 파일을 바꾸지 않고 "
+        "diff만 만들어 사용자에게 보여줄 제안을 만든다. 실제 저장은 사용자가 diff를 확인하고 "
+        "명시적으로 승인한 뒤에만 일어난다. 파일을 이미 고쳤다고 말하지 마라.",
+        {
+            "file_id": {
+                "type": "string",
+                "description": "편집 대상 FileRef identity (read_file 결과의 file_id)",
+            },
+            "path": {
+                "type": "string",
+                "description": "루트 기준 상대 경로 (read_file의 path와 일치해야 함)",
+            },
+            "content": {
+                "type": "string",
+                "description": "수정 후 파일의 전체 내용",
+            },
+            "root": {
+                "type": "string",
+                "description": "루트 이름 (read_file의 root_id). 생략 가능.",
+            },
+            "summary": {
+                "type": "string",
+                "description": "무엇을 바꾸는지 한 줄 설명. 생략 가능.",
+            },
+        },
+        ["file_id", "path", "content"],
+    )
+
+
 def search_files() -> ToolSchema:
     """승인된 루트에서 파일 검색 (read — File access, §7)."""
     return _schema(
