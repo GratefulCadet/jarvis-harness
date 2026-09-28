@@ -39,6 +39,7 @@ import json
 import os
 import shutil
 import sys
+import threading
 from pathlib import Path
 from typing import Any, Callable, TextIO
 
@@ -48,8 +49,11 @@ from harness.agent_runs import (
     TERMINAL_STATUSES,
     default_agent_runs_file,
     get_runner,
+    register_runner,
     start_verification,
 )
+from harness.freebuff_orchestrator import FreebuffOrchestratorError, FreebuffOrchestratorManager
+from harness.freebuff_runner import FreebuffRunner
 from harness.agent_sessions import (
     AGENT_TYPES,
     AgentSessionError,
@@ -118,6 +122,46 @@ MAX_RESUMES = 3
 _AGENT_RUN_STORE: AgentRunStore | None = None
 _AGENT_RUNNERS: dict[str, Any] = {}
 _AGENT_SESSION_STORE: AgentSessionStore | None = None
+_FREEBUFF_MANAGER: FreebuffOrchestratorManager | None = None
+_FREEBUFF_RUNNER: FreebuffRunner | None = None
+_FREEBUFF_MANAGER_OVERRIDES: list[FreebuffOrchestratorManager] = []
+_FREEBUFF_RUNNER_KEY: tuple[str, str] | None = None
+_FREEBUFF_LOCK = threading.RLock()
+
+
+def _freebuff_manager() -> FreebuffOrchestratorManager:
+    global _FREEBUFF_MANAGER
+    if _FREEBUFF_MANAGER is None:
+        _FREEBUFF_MANAGER = FreebuffOrchestratorManager()
+    return _FREEBUFF_MANAGER
+
+
+def _freebuff_runner(store: AgentRunStore, memory_dir: Path | str) -> FreebuffRunner:
+    global _FREEBUFF_RUNNER, _FREEBUFF_MANAGER, _FREEBUFF_RUNNER_KEY
+    session_store = AgentSessionStore(default_agent_sessions_file(memory_dir))
+    cache_key = (str(Path(memory_dir).resolve()), str(store.registry_file.resolve()))
+    with _FREEBUFF_LOCK:
+        if _FREEBUFF_RUNNER is None or _FREEBUFF_RUNNER_KEY != cache_key:
+            if _FREEBUFF_RUNNER is not None:
+                _FREEBUFF_RUNNER.manager.cleanup()
+            manager = (
+                _FREEBUFF_MANAGER_OVERRIDES[0]
+                if _FREEBUFF_MANAGER_OVERRIDES
+                else _freebuff_manager()
+            )
+            _FREEBUFF_RUNNER = FreebuffRunner(
+                store,
+                memory_dir,
+                session_store=session_store,
+                manager=manager,
+            )
+            _FREEBUFF_RUNNER_KEY = cache_key
+        else:
+            _FREEBUFF_RUNNER.bind_session_store(session_store)
+        return _FREEBUFF_RUNNER
+
+
+register_runner("freebuff", _freebuff_runner)
 
 
 def agent_session_store(client: HarnessClient) -> AgentSessionStore:
@@ -144,11 +188,29 @@ def agent_run_store(client: HarnessClient) -> AgentRunStore:
     memory_dir = client.config.memory_dir
     if memory_dir is None or not Path(memory_dir).is_dir():
         raise AgentRunError("memory_dir 미설정 — JARVIS state 경로가 없습니다")
+    previous_store = _AGENT_RUN_STORE
     if _AGENT_RUN_STORE is None or _AGENT_RUN_STORE.registry_file.parent != Path(
         memory_dir
     ).resolve():
         _AGENT_RUN_STORE = AgentRunStore(default_agent_runs_file(memory_dir))
         _AGENT_RUNNERS.clear()
+        global _FREEBUFF_RUNNER, _FREEBUFF_MANAGER, _FREEBUFF_RUNNER_KEY, _AGENT_SESSION_STORE
+        # Initial binding must preserve a manager injected by the owning bridge
+        # lifecycle (including the authenticated scratch E2E). Only retire resources
+        # when switching away from an already-bound memory directory.
+        if previous_store is not None:
+            if _FREEBUFF_RUNNER is not None:
+                _FREEBUFF_RUNNER.manager.cleanup()
+            elif _FREEBUFF_MANAGER is not None:
+                _FREEBUFF_MANAGER.cleanup()
+            for override in _FREEBUFF_MANAGER_OVERRIDES:
+                override.cleanup()
+            _FREEBUFF_MANAGER_OVERRIDES.clear()
+            _FREEBUFF_RUNNER = None
+            _FREEBUFF_MANAGER = None
+            _FREEBUFF_RUNNER_KEY = None
+            _AGENT_SESSION_STORE = None
+
     return _AGENT_RUN_STORE
 
 
@@ -191,74 +253,54 @@ def _agent_run_payload(run: dict[str, Any]) -> dict[str, Any]:
 
 
 def _agent_run_start(client: HarnessClient, request_id: Any, payload: dict[str, Any]) -> dict[str, Any]:
-    """Agent Delegation V1 — Task를 Codex AgentRun에 위임 (즉시 반환, 폴링 계약).
-
-    renderer가 넘기는 것은 agent_type/task_id/instruction/repo_path 같은
-    constrained 값뿐이다. 실제 CLI argv는 CodexRunner가 조립한다 — 모델이나
-    renderer가 command string을 넘기는 구조를 만들지 않는다(§14).
-    """
+    """Start the explicitly selected runner, binding Freebuff runs to an active session."""
     try:
         memory_dir = client.config.memory_dir
         if memory_dir is None or not Path(memory_dir).is_dir():
-            return {
-                "type": "response", "id": request_id, "status": "error",
-                "error": "memory_dir 미설정 — JARVIS state 경로가 없습니다",
-            }
+            raise AgentRunError("memory_dir 미설정 — JARVIS state 경로가 없습니다")
         agent_type = str(payload.get("agent_type") or "codex").strip()
         instruction = payload.get("instruction")
         if not isinstance(instruction, str) or not instruction.strip():
-            return {
-                "type": "response", "id": request_id, "status": "error",
-                "error": "instruction이 비어 있습니다",
-            }
+            raise AgentRunError("instruction이 비어 있습니다")
         instruction = instruction.strip()
         if len(instruction) > 20000:
-            return {
-                "type": "response", "id": request_id, "status": "error",
-                "error": "instruction이 너무 깁니다 (최대 20000자)",
-            }
+            raise AgentRunError("instruction이 너무 깁니다 (최대 20000자)")
+
+        requested_session_id = payload.get("session_id")
+        session = None
+        if requested_session_id is not None:
+            if not isinstance(requested_session_id, str) or not requested_session_id.strip():
+                raise AgentRunError("session_id 형식이 잘못되었습니다")
+            session = agent_session_store(client).get(requested_session_id.strip())
+            if session is None:
+                raise AgentRunError(f"알 수 없는 session: {requested_session_id}")
+            if session.get("status") != "active":
+                raise AgentRunError(f"{session.get('status') or 'inactive'} session에서는 run을 시작할 수 없습니다")
+            if session.get("agent_type") == "freebuff":
+                agent_type = "freebuff"
+            elif agent_type != session.get("agent_type"):
+                raise AgentRunError("session agent_type과 run agent_type이 일치하지 않습니다")
+
         task_id = payload.get("task_id")
+        if session is not None and session.get("task_id"):
+            task_id = session["task_id"]
         if task_id is not None:
             if not isinstance(task_id, str) or not task_id.strip():
-                return {
-                    "type": "response", "id": request_id, "status": "error",
-                    "error": "task_id 형식이 잘못되었습니다",
-                }
+                raise AgentRunError("task_id 형식이 잘못되었습니다")
             task_id = task_id.strip()
             task = TaskStore(
                 client.config.task_file or (Path(memory_dir) / "tasks.md"),
                 memory_dir=memory_dir,
             ).find_task(task_id)
             if task is None:
-                return {
-                    "type": "response", "id": request_id, "status": "error",
-                    "error": f"알 수 없는 task: {task_id}",
-                }
-        repo_path = _resolve_repo_path(client, payload.get("repo_path"))
+                raise AgentRunError(f"알 수 없는 task: {task_id}")
 
-        # AgentSession integration (마일스톤 §5) — session에서 run을 시작하면
-        # session의 agent_type/task_id가 authoritative다. renderer가 서로 모순되는
-        # 조합(session=Freebuff + agent_type=codex + 남의 task)을 만들지 못하게
-        # Harness가 결정하고, run에 session_id를 새긴다. 기존 run(session_id 없음)은
-        # 영향받지 않는다(migration-safe: session_id 없는 run은 그대로 codex 위임).
-        session = None
-        requested_session_id = payload.get("session_id")
-        if isinstance(requested_session_id, str) and requested_session_id.strip():
-            sessions = agent_session_store(client)
-            session = sessions.get(requested_session_id.strip())
-            if session is None:
-                raise AgentRunError(f"알 수 없는 session: {requested_session_id}")
-            if session.get("status") == "archived":
-                raise AgentRunError("archived session에서는 run을 시작할 수 없습니다")
-            agent_type = str(session.get("agent_type") or agent_type)
-            session_task_id = session.get("task_id")
-            if session_task_id:
-                task_id = session_task_id
-            session_workspace = session.get("workspace")
-            if session_workspace:
-                resolved_session_ws = Path(session_workspace).resolve()
-                if resolved_session_ws != Path(repo_path).resolve():
-                    repo_path = str(resolved_session_ws)
+        if agent_type == "freebuff" and session is None:
+            raise AgentRunError("Freebuff run에는 기존 AgentSession binding이 필요합니다")
+        if session is not None and session.get("workspace"):
+            repo_path = _resolve_repo_path(client, session["workspace"])
+        else:
+            repo_path = _resolve_repo_path(client, payload.get("repo_path"))
 
         store = agent_run_store(client)
         runner = _agent_runner(client, agent_type)
@@ -267,46 +309,47 @@ def _agent_run_start(client: HarnessClient, request_id: Any, payload: dict[str, 
             instruction=instruction,
             repo_path=repo_path,
             task_id=task_id,
-            project_id=payload.get("project_id") if isinstance(payload.get("project_id"), str) else None,
+            project_id=(session.get("project_id") if session else None) or (
+                payload.get("project_id") if isinstance(payload.get("project_id"), str) else None
+            ),
             session_id=session["session_id"] if session is not None else None,
         )
-        runner.start(run["run_id"], {
-            "repo_path": repo_path,
-            "instruction": instruction,
-        })
+        try:
+            runner.start(run["run_id"], {"repo_path": repo_path, "instruction": instruction})
+        except Exception as exc:
+            current = store.get(run["run_id"]) or run
+            if current.get("status") in {"queued", "running"}:
+                store.update(
+                    run["run_id"], status="failed", finished_at=_now_iso_for_bridge(),
+                    error=str(exc)[:500],
+                )
+            raise
         if session is not None:
             try:
-                agent_session_store(client).record_run_link(
-                    session["session_id"], run["run_id"]
-                )
+                agent_session_store(client).record_run_link(session["session_id"], run["run_id"])
             except AgentSessionError:
-                pass  # 세션 링크 기록은 부수효과 — run 시작을 막지 않는다
+                pass
         updated = store.get(run["run_id"]) or run
         _record_activity(
             client,
-            project_id=payload.get("project_id") or DEFAULT_PROJECT,
+            project_id=(session.get("project_id") if session else None) or payload.get("project_id") or DEFAULT_PROJECT,
             operation="agent_run_start",
             arguments={
-                "run_id": run["run_id"],
-                "agent_type": agent_type,
-                "task_id": task_id,
-                "repo_path": repo_path,
+                "run_id": run["run_id"], "agent_type": agent_type,
+                "task_id": task_id, "repo_path": repo_path,
                 **({"session_id": session["session_id"]} if session else {}),
             },
             summary=f"AgentRun 시작: {agent_type} ({run['run_id']})",
         )
         return {
             "type": "response", "id": request_id, "status": "ok",
-            "run": _agent_run_payload(updated),
-            "scratch": _is_scratch_dir(memory_dir),
+            "run": _agent_run_payload(updated), "scratch": _is_scratch_dir(memory_dir),
         }
     except AgentRunError as exc:
         return {"type": "response", "id": request_id, "status": "error", "error": str(exc)}
     except Exception as exc:
-        return {
-            "type": "response", "id": request_id, "status": "error",
-            "error": f"{type(exc).__name__}: {exc}",
-        }
+        return {"type": "response", "id": request_id, "status": "error",
+                "error": f"{type(exc).__name__}: {exc}"}
 
 
 def _agent_run_status(client: HarnessClient, request_id: Any, payload: dict[str, Any]) -> dict[str, Any]:
@@ -314,7 +357,11 @@ def _agent_run_status(client: HarnessClient, request_id: Any, payload: dict[str,
         run_id = payload.get("run_id")
         if not isinstance(run_id, str) or not run_id.strip():
             raise AgentRunError("run_id가 비어 있습니다")
-        runner = _agent_runner(client, payload.get("agent_type") or "codex")
+        store = agent_run_store(client)
+        record = store.get(run_id.strip())
+        if record is None:
+            raise AgentRunError(f"알 수 없는 run: {run_id}")
+        runner = _agent_runner(client, record.get("agent_type") or "codex")
         run = runner.status(run_id.strip())
         return {
             "type": "response", "id": request_id, "status": "ok",
@@ -327,6 +374,28 @@ def _agent_run_status(client: HarnessClient, request_id: Any, payload: dict[str,
             "type": "response", "id": request_id, "status": "error",
             "error": f"{type(exc).__name__}: {exc}",
         }
+
+
+def _agent_run_result(client: HarnessClient, request_id: Any, payload: dict[str, Any]) -> dict[str, Any]:
+    try:
+        run_id = payload.get("run_id")
+        if not isinstance(run_id, str) or not run_id.strip():
+            raise AgentRunError("run_id가 비어 있습니다")
+        store = agent_run_store(client)
+        record = store.get(run_id.strip())
+        if record is None:
+            raise AgentRunError(f"알 수 없는 run: {run_id}")
+        runner = _agent_runner(client, record.get("agent_type") or "codex")
+        run = runner.collect_result(run_id.strip())
+        return {
+            "type": "response", "id": request_id, "status": "ok",
+            "run": _agent_run_payload(run),
+        }
+    except AgentRunError as exc:
+        return {"type": "response", "id": request_id, "status": "error", "error": str(exc)}
+    except Exception as exc:
+        return {"type": "response", "id": request_id, "status": "error",
+                "error": f"{type(exc).__name__}: {exc}"}
 
 
 def _agent_run_list(client: HarnessClient, request_id: Any, payload: dict[str, Any]) -> dict[str, Any]:
@@ -2688,6 +2757,9 @@ def handle_message(
         if message_type == "agent_run_list":
             return _agent_run_list(client, request_id, msg)
 
+        if message_type == "agent_run_result":
+            return _agent_run_result(client, request_id, msg)
+
         if message_type == "agent_run_cancel":
             return _agent_run_cancel(client, request_id, msg)
 
@@ -2978,29 +3050,45 @@ def run_bridge(
     read_line: ReadLine,
     write_line: WriteLine,
 ) -> None:
-    """stdin JSONL → 처리 → stdout JSONL 루프."""
+    """stdin JSONL → 처리 → stdout JSONL 루프; shutdown 시 자식과 credential을 정리."""
     session = BridgeSession()
-    for raw in iter(read_line, ""):
-        if not raw.strip():
-            continue
-        try:
-            msg = json.loads(raw)
-            if not isinstance(msg, dict):
-                raise ValueError("요청은 JSON object여야 합니다")
-        except (json.JSONDecodeError, ValueError) as exc:
-            write_line(json.dumps({
-                "type": "response", "id": None,
-                "status": "error", "error": f"잘못된 요청: {exc}",
-            }, ensure_ascii=False))
-            continue
-        if msg.get("type") == "shutdown":
-            write_line(json.dumps(
-                {"type": "response", "id": msg.get("id"), "status": "ok"},
-                ensure_ascii=False,
-            ))
-            break
-        response = handle_message(client, session, msg)
-        write_line(json.dumps(response, ensure_ascii=False))
+    try:
+        for raw in iter(read_line, ""):
+            if not raw.strip():
+                continue
+            try:
+                msg = json.loads(raw)
+                if not isinstance(msg, dict):
+                    raise ValueError("요청은 JSON object여야 합니다")
+            except (json.JSONDecodeError, ValueError) as exc:
+                write_line(json.dumps({
+                    "type": "response", "id": None,
+                    "status": "error", "error": f"잘못된 요청: {exc}",
+                }, ensure_ascii=False))
+                continue
+            if msg.get("type") == "shutdown":
+                write_line(json.dumps(
+                    {"type": "response", "id": msg.get("id"), "status": "ok"},
+                    ensure_ascii=False,
+                ))
+                break
+            response = handle_message(client, session, msg)
+            write_line(json.dumps(response, ensure_ascii=False))
+    finally:
+        runner = _FREEBUFF_RUNNER
+        if runner is not None:
+            try:
+                runner.cancel_all()
+            except Exception:
+                try:
+                    runner.manager.cleanup()
+                except Exception:
+                    pass
+        elif _FREEBUFF_MANAGER is not None:
+            try:
+                _FREEBUFF_MANAGER.cleanup()
+            except Exception:
+                pass
 
 
 def main(argv: list[str] | None = None) -> int:

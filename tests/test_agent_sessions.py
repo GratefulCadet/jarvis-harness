@@ -531,6 +531,7 @@ class SessionRunIntegrationTest(unittest.TestCase):
         )
         self.client = _fake_client(self.memory)
         self.client.config.file_roots = {"scratch": str(self.repo)}
+        self.other_roots: list[Path] = []
         self.old_bin = os.environ.get("JARVIS_CODEX_BIN")
         self.old_timeout = os.environ.get("JARVIS_AGENT_RUN_TIMEOUT_S")
         os.environ["JARVIS_CODEX_BIN"] = f"python {_write_fake_codex(Path(self.tmp.name))}"
@@ -544,6 +545,15 @@ class SessionRunIntegrationTest(unittest.TestCase):
         self.session = created["session"]
 
     def tearDown(self) -> None:
+        try:
+            store = AgentRunStore(self.memory / "agent_runs.json")
+            for run in store.list_runs(limit=100):
+                if run.get("status") in {"queued", "running"}:
+                    runner = __import__("scripts.harness_bridge", fromlist=["_AGENT_RUNNERS"])._AGENT_RUNNERS.get(run.get("agent_type"))
+                    if runner is not None:
+                        runner.cancel(run["run_id"])
+        except Exception:
+            pass
         if self.old_bin is None:
             os.environ.pop("JARVIS_CODEX_BIN", None)
         else:
@@ -613,6 +623,7 @@ class SessionRunIntegrationTest(unittest.TestCase):
         # session의 workspace가 authoritative — 다른 approved root를 보내도 session 것 사용
         other = Path(self.tmp.name) / "other"
         other.mkdir()
+        self.other_roots.append(other)
         subprocess.run(["git", "init", "-q"], cwd=other, check=True)
         (other / "a.txt").write_text("a", encoding="utf-8")
         subprocess.run(["git", "add", "."], cwd=other, check=True)

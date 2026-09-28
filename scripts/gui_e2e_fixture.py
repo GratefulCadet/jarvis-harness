@@ -84,6 +84,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--project-id", default="jarvis-app")
     parser.add_argument("--title", default="GUI E2E 검증 프로젝트")
     parser.add_argument("--file-name", default="experiment-notes.md")
+    parser.add_argument(
+        "--seed-task-file-link",
+        action="store_true",
+        help=(
+            "미완료 task 1개 + FileRef + task→file ResourceLink를 canonical "
+            "writer로 함께 만든다(UX Continuity의 '바로 이어하기' 검증용 — "
+            "브리핑 [시작]이 Active File까지 여는 경로를 재현한다)."
+        ),
+    )
     args = parser.parse_args(argv)
 
     state_dir = Path(args.state_dir).resolve()
@@ -119,6 +128,38 @@ def main(argv: list[str] | None = None) -> int:
     )
     workspaces.set_project_primary_workspace(args.project_id, root_id)
 
+    seeded_task_id = None
+    if args.seed_task_file_link:
+        # UX Continuity 검증용 — 전부 실제 canonical writer로 만든다(손으로 JSON
+        # 쓰지 않는 원칙 유지). task → FileRef(f-*) → ResourceLink 순서.
+        from harness.tools.task_store import TaskStore
+        from harness.tools.file_store import FileStore
+        from harness.tools.workspace import (
+            WorkspaceManager,
+            default_registry_file,
+        )
+        from harness.tools.resource_links import ProjectResources
+
+        store = TaskStore(state_dir / "tasks.md", memory_dir=state_dir)
+        created = store.create(args.project_id, "브리핑 검증용 작업", "ux continuity 검증")
+        seeded_task_id = created["id"]
+
+        manager = WorkspaceManager(
+            FileStore({root_id: workspace_dir}),
+            default_registry_file(state_dir),
+        )
+        manager.scan_root(root_id)
+        ref = manager.registry.by_path(root_id, args.file_name)
+        if ref is None:
+            raise RuntimeError(f"FileRef 생성 실패: {args.file_name}")
+
+        resources = ProjectResources(
+            state_dir / "resource_links.json",
+            memory_dir=state_dir,
+            workspace=manager,
+        )
+        resources.link_task_file(seeded_task_id, ref.id, "reference")
+
     print(
         json.dumps(
             {
@@ -129,6 +170,7 @@ def main(argv: list[str] | None = None) -> int:
                 "file_name": args.file_name,
                 "file_path": str(sample),
                 "file_roots_env": f"{root_id}={workspace_dir}",
+                "task_id": seeded_task_id,
             },
             ensure_ascii=False,
         )

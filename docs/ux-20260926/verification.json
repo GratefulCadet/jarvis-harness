@@ -1,0 +1,278 @@
+{
+  "startedAt": "2026-09-26T10:34:23.701Z",
+  "journeys": [
+    {
+      "journey": "A-first-open",
+      "step": "initial state",
+      "viewport": "2560x1392",
+      "view": "command-center",
+      "contextOpen": "false",
+      "buttons": [
+        {
+          "label": "Toggle JARVIS context",
+          "cls": "jarvis-context-button"
+        },
+        {
+          "label": "마이크로 말하기 (누르고 있는 동안 녹음)",
+          "cls": "jarvis-mic-button"
+        },
+        {
+          "label": "보내기",
+          "cls": "jarvis-command-send"
+        },
+        {
+          "label": "음성 모드 (응답을 소리로 듣기)",
+          "cls": "jarvis-voice-mode-button"
+        },
+        {
+          "label": "Return JARVIS to PiP",
+          "cls": "core-trigger"
+        }
+      ],
+      "inputs": [
+        {
+          "ph": "무엇을 도와드릴까요?",
+          "cls": "jarvis-command-input"
+        }
+      ],
+      "bodyText": "JARVIS 프로젝트 · GUI E2E 검증 프로젝트 작업 · 파일 SCRATCH 보내기 요청을 입력하거나 작업 · 파일에서 자료를 열어보세요. 어떤 일을 시작할까요? 아래에 요청을 적어주세요. 파일을 함께 보려면 ‘작업 · 파일’을 열면 됩니다. 새 작업을 만들거나 내용을 변경할 때는 먼저 승인을 요청합니다. 작은 창으로 · PiP"
+    },
+    {
+      "journey": "B-start",
+      "step": "after context toggle",
+      "clicksSoFar": 1,
+      "inputs": [
+        {
+          "ph": "무엇을 도와드릴까요?",
+          "cls": "jarvis-command-input"
+        },
+        {
+          "ph": "Find node",
+          "cls": ""
+        }
+      ],
+      "view": "command-center"
+    },
+    {
+      "journey": "B-open-file",
+      "step": "editor opened",
+      "clicksSoFar": 2,
+      "editorOpen": true
+    },
+    {
+      "journey": "B-send",
+      "step": "request sent",
+      "clicksSoFar": 3
+    },
+    {
+      "journey": "B-permission-panel",
+      "step": "content",
+      "text": "PERMISSION REQUIRED Create task UX audit 검증 작업 Project context: selected project Reason: audit Nothing has changed yet. APPROVE REJECT"
+    },
+    {
+      "journey": "B-link-done",
+      "step": "journey complete",
+      "clicksSoFar": 5,
+      "cardText": "지금 보고 있는 파일(experiment-notes.md)을 새로 만든 작업(UX audit 검증 작업)에 연결할까요? Link file Not now"
+    },
+    {
+      "journey": "C-briefing",
+      "step": "content & position",
+      "text": "이어서 할 일 GUI E2E 검증 프로젝트 작업 현황 진행 중 1 · 완료 0 최근 활동 작업에 자료 연결: t-8c4215468d12 관련 파일 experiment-notes.md 다음 행동 UX audit 검증 작업 audit 자료: experiment-notes.md 이어서 작업",
+      "rect": "410,266",
+      "composerTop": 1269
+    },
+    {
+      "journey": "C-start-task",
+      "step": "after [시작]",
+      "clicksSoFar": 3,
+      "focus": "현재 작업 UX audit 검증 작업",
+      "editorOpen": true,
+      "drawerOpen": "true"
+    },
+    {
+      "journey": "D-to-pip",
+      "step": "after collapse",
+      "transitionMs": 945,
+      "view": "pip",
+      "viewport": "280x280",
+      "buttons": [
+        {
+          "label": "Open JARVIS Assistant",
+          "cls": "pip-presence-orb-trigger"
+        },
+        {
+          "label": "Send from PiP",
+          "cls": ""
+        },
+        {
+          "label": "요청을 처리했습니다.\n응답 보기 →",
+          "cls": "pip-result-button"
+        }
+      ]
+    },
+    {
+      "journey": "D-to-main",
+      "step": "after expand",
+      "transitionMs": 637,
+      "view": "command-center"
+    }
+  ],
+  "probes": [
+    {
+      "name": "A-initial-view",
+      "view": "command-center",
+      "viewport": "2560x1392"
+    },
+    {
+      "name": "A-button-count-first-screen",
+      "count": 5,
+      "buttons": [
+        "Toggle JARVIS context",
+        "마이크로 말하기 (누르고 있는 동안 녹음)",
+        "보내기",
+        "음성 모드 (응답을 소리로 듣기)",
+        "Return JARVIS to PiP"
+      ]
+    },
+    {
+      "name": "A-inputs-first-screen",
+      "count": 1,
+      "inputs": [
+        "무엇을 도와드릴까요?"
+      ]
+    },
+    {
+      "name": "B-context-button-hit",
+      "exists": true,
+      "hitSelf": true,
+      "hit": "SPAN.",
+      "rect": "1589,161,101,36"
+    },
+    {
+      "name": "B-composer-hit-with-drawer-open",
+      "exists": true,
+      "hitSelf": true,
+      "hit": "INPUT.jarvis-command-input",
+      "rect": "103,1269,1872,52"
+    },
+    {
+      "name": "B-send-hit-with-drawer-open",
+      "exists": true,
+      "hitSelf": true,
+      "hit": "BUTTON.jarvis-command-send",
+      "rect": "1983,1269,78,52"
+    },
+    {
+      "name": "B-visible-text-inputs",
+      "count": 2,
+      "list": [
+        "이 파일에 대해 무엇을 도와드릴까요?",
+        "Contents of experiment-notes.md"
+      ]
+    },
+    {
+      "name": "B-typing-into-composer",
+      "result": "ok"
+    },
+    {
+      "name": "B-total-clicks-to-start-work",
+      "clicks": 5
+    },
+    {
+      "name": "C-start-button-hit",
+      "exists": true,
+      "hitSelf": true,
+      "hit": "BUTTON.jarvis-resume-start",
+      "rect": "1128,587,109,47"
+    },
+    {
+      "name": "C-total-clicks-from-continue-to-work",
+      "clicks": 3
+    },
+    {
+      "name": "D-core-orb-hit-in-command-center",
+      "exists": true,
+      "hitSelf": true,
+      "hit": "DIV.core-energy",
+      "rect": "49,24,45,73"
+    },
+    {
+      "name": "D-pip-orb-hit",
+      "exists": true,
+      "hitSelf": true,
+      "hit": "BUTTON.pip-presence-orb-trigger",
+      "rect": "98,17,84,84"
+    },
+    {
+      "name": "D-core-orb-hit-in-pip",
+      "exists": false
+    },
+    {
+      "name": "D-escape-layers-before-esc",
+      "editorOpen": true,
+      "drawerOpen": "true"
+    },
+    {
+      "name": "layout-1280",
+      "panel": {
+        "left": 24,
+        "right": 625.59375,
+        "top": 132,
+        "bottom": 768,
+        "width": 601.59375
+      },
+      "editor": {
+        "left": 641.609375,
+        "right": 1256,
+        "top": 132,
+        "bottom": 768,
+        "width": 614.390625
+      },
+      "input": {
+        "left": 103,
+        "right": 460.90625,
+        "top": 677,
+        "bottom": 729,
+        "width": 357.90625
+      },
+      "leakedComment": false
+    },
+    {
+      "name": "layout-900",
+      "panel": {
+        "left": 16,
+        "right": 470,
+        "top": 108,
+        "bottom": 784,
+        "width": 454
+      },
+      "editor": {
+        "left": 486,
+        "right": 884,
+        "top": 108,
+        "bottom": 784,
+        "width": 398
+      },
+      "input": {
+        "left": 83,
+        "right": 317.3125,
+        "top": 705,
+        "bottom": 757,
+        "width": 234.3125
+      },
+      "leakedComment": false
+    },
+    {
+      "name": "editor-independent-of-drawer",
+      "passed": true
+    },
+    {
+      "name": "escape-file-first",
+      "passed": true
+    }
+  ],
+  "consoleErrors": [
+    "%cElectron Security Warning (Insecure Content-Security-Policy) font-weight: bold; This renderer process has either no Content Security\n  Policy set or a policy with \"unsafe-eval\" enabled. This exposes"
+  ]
+}

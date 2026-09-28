@@ -30,3 +30,6 @@ venv/
 # OS
 .DS_Store
 Thumbs.db
+
+# Test-generated artifacts (review HTML reports, run outputs)
+tests/artifacts/

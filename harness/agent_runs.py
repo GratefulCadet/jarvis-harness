@@ -105,7 +105,8 @@ def _pid_alive(pid: Any) -> bool:
 _UPDATABLE_FIELDS = frozenset({
     "status", "started_at", "finished_at", "exit_code", "result_summary",
     "error", "changed_files", "verification", "pid", "worktree_path",
-    "branch", "log_path", "log_tail",
+    "branch", "log_path", "log_tail", "external_thread_id",
+    "started_message_count", "completed_message_count", "freebuff_baseline",
 })
 
 
@@ -777,6 +778,13 @@ def start_verification(store: AgentRunStore, run_id: str, command: str) -> dict[
 # ---------- runner registry ----------
 
 _RUNNER_FACTORIES: dict[str, Any] = {"codex": CodexRunner}
+
+
+def register_runner(agent_type: str, factory: Any) -> None:
+    """Register a runner implementation without changing existing implementations."""
+    if not isinstance(agent_type, str) or not agent_type.strip() or not callable(factory):
+        raise AgentRunError("runner registration requires an agent type and callable factory")
+    _RUNNER_FACTORIES[agent_type.strip()] = factory
 
 
 def get_runner(agent_type: str, store: AgentRunStore, memory_dir: Path | str) -> AgentRunner:
