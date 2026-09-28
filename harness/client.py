@@ -9,6 +9,7 @@ from harness.config import HarnessConfig
 from harness.models import (
     ChatRequest,
     ChatResponse,
+    LoopContinuation,
     RuntimeAdapter,
     ToolCall,
     ToolResult,
@@ -343,11 +344,22 @@ class HarnessClient:
                     final = ChatResponse(
                         content=(
                             f"tool 루프 한도({limit}회)에 도달해 중단합니다. "
-                            f"마지막 tool 요청(실행 안 함): {blocked_text} (§8.3-3)"
+                            f"마지막 tool 요청(실행 안 함): {blocked_text} "
+                            f"— 개발 모드에서는 한도를 올릴 수 있습니다 "
+                            f"(JARVIS_DEV_MODE=1, 또는 JARVIS_TOOL_LOOP_MAX_TURNS=<회수>)."
                         ),
                         tool_calls=list(response.tool_calls),
                         finish_reason="tool_loop_limit",
                         trace_id=trace_id,
+                        # 이 지점의 working은 "마지막으로 실행된 도구 결과까지"다.
+                        # 이 턴의 assistant echo는 아직 붙지 않았으므로, 그대로
+                        # 이어받으면 응답 없는 tool_calls가 남지 않는다.
+                        continuation=LoopContinuation(
+                            messages=self._resume_safe_transcript(working),
+                            blocked_tool_calls=[self._copy_call(c) for c in response.tool_calls],
+                            turns=turns,
+                            max_turns=limit,
+                        ),
                     )
                     latency_ms = int((time.perf_counter() - started) * 1000)
                     self._trace.record(
@@ -487,6 +499,34 @@ class HarnessClient:
                 "content": _tool_message_content(result),
             })
         return blocked
+
+    @staticmethod
+    def _resume_safe_transcript(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """이어가기에 넘길 대화에서 tool 응답 없는 assistant 메시지를 뺀다.
+
+        왜 필요하가: tool_calls가 달린 assistant 메시지에는 뒤따르는 tool 응답이
+        있어야 어댑터가 메시지를 받아들인다. 한도 지점에서는 구조상 dangling이 생기지
+        않지만, provider가 tool_call id를 붙이지 않으면 짝 확인이 어려워진다.
+        resume은 이 transcript를 그대로 물려받는 경로이므로, 형식이 깨진 채로
+        넘어가면 "이어가기"가 이유 모를 오류로 실패한다. 여기서 한 번 걸러낸다.
+        """
+        out: list[dict[str, Any]] = []
+        pending = 0
+        for message in messages:
+            role = message.get("role")
+            if role == "assistant" and message.get("tool_calls"):
+                out.append(message)
+                pending = len(message["tool_calls"])
+            elif role == "tool":
+                out.append(message)
+                pending = max(0, pending - 1)
+            else:
+                if pending:
+                    # tool 응답이 오기 전에 다른 역할이 끼어들었다 — 짝 없는 호출.
+                    out.pop()
+                    pending = 0
+                out.append(message)
+        return out
 
     @staticmethod
     def _copy_call(call: ToolCall) -> dict[str, Any]:

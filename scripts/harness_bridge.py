@@ -80,6 +80,55 @@ from harness.tools.workspace_roots import (
 DEFAULT_PROJECT = "jarvis-app"
 DEFAULT_SCRATCH = PROJECT_ROOT / "data" / "electron_scratch"
 
+# resume(한도 중단 후 이어가기) 최대 횟수.
+#
+# 왜 상한이 있는가: resume은 한도를 "처음부터 다시" 주므로, 횟수 제한이 없으면
+# 같은 tool을 무한히 반복하는 모델이 버튼만 눌러 계속 돌 수 있다. 매번 온전한
+# 예산을 다시 주되 횟수를 제한하면, 실제 편집 작업 한 건은 끝낼 수 있으면서
+# 무한 루프는 구조적으로 불가능하다.
+MAX_RESUMES = 3
+
+
+def _call_name(call: Any) -> str:
+    """ToolCall 객체이든 중립 dict이든 이름을 꺼낸다.
+
+    client._copy_call()은 어댑터로 넘길 메시지용 dict를 돌려준다. getattr만 쓰면
+    dict에는 닿지 않아 이름이 '?'로 새어나가고, 왜 막혔는지 알려줄 수 없다.
+    """
+    if isinstance(call, dict):
+        name = call.get("name")
+    else:
+        name = getattr(call, "name", None)
+    return str(name) if name else "?"
+
+
+def _resume_system_line(continuation: Any) -> str:
+    """한도 중단 지점을 이어갈 때 모델에 주는 지시.
+
+    system 메시지로 넣는 이유: 사용자는 이 순간 아무것도 다시 타이핑하지 않았다.
+    user 메시지로 넣으면 "사용자가 이렇게 말했다"는 형태로 대화 기록에 남겨서,
+    실제로 하지 않은 말을 사용자에게 돌려주는 셈이 된다. system은 그 구분을
+    지킨다.
+    """
+    blocked = getattr(continuation, "blocked_tool_calls", None) or []
+    lines = [
+        "Your previous attempt was stopped at the tool-call limit "
+        f"({getattr(continuation, 'turns', 0)} of "
+        f"{getattr(continuation, 'max_turns', 0)} turns). "
+        "The conversation above is the real transcript of that attempt.",
+        "Continue from where it stopped. Do not restart, do not redo work that "
+        "already has a tool result above, and do not re-issue an identical tool "
+        "call that already returned — read what the results already say and act on "
+        "them.",
+    ]
+    if blocked:
+        names = ", ".join(_call_name(call) for call in blocked)
+        lines.append(
+            f"The request that was never executed (do not assume it ran): {names}. "
+            "Run it only if it is still needed and still valid."
+        )
+    return "\n".join(lines)
+
 ReadLine = Callable[[], str]
 WriteLine = Callable[[str], None]
 
@@ -1700,6 +1749,17 @@ class BridgeSession:
         # Milestone A — 마지막 chat에서 만든 프로젝트 문맥 요약. confirm 경로가
         # 이어받아 모델 컨텍스트에 다시 주입한다(프로젝트 id·목록 재해석 방지).
         self.last_project_context: str | None = None
+        # tool_loop_limit으로 끊긴 지점. resume이 재사용한 뒤에는 비운다 —
+        # 같은 지점을 두 번 이어가면 이미 실행된 도구 결과가 두 번 쌓인다.
+        self.pending_resume: Any = None
+        self.resume_count: int = 0
+        # 이 작업에서 이미 만들어진 마지막 편집 제안.
+        # 왜 기억해야 하나: 제안은 한 trace 안에서만 보인다. 한도에 걸린 턴이
+        # 제안까지 만든 뒤 끊기고, 이어간 턴은 새 trace에서 도는 경우 — 그때
+        # 이어간 응답의 trace에는 edit_file 결과가 없어서, 제안이 있어도
+        # renderer로 올라가지 않는다. 사용자는 "제안을 만들었습니다"만 보고
+        # diff도, 승인 수단도 갖지 못한다.
+        self.last_proposal: dict[str, Any] | None = None
 
 
 def _project_context_line(client: HarnessClient, project_id: str) -> str | None:
@@ -2034,7 +2094,7 @@ def handle_message(
         if message_type == "shutdown":
             raise SystemExit(0)
 
-        if message_type in ("chat", "confirm"):
+        if message_type in ("chat", "confirm", "resume"):
             scratch = str(client.config.memory_dir).replace("\\", "/").startswith(
                 str(PROJECT_ROOT).replace("\\", "/") + "/data/"
             )
@@ -2050,6 +2110,14 @@ def handle_message(
                     }
                 session.last_text = text
                 session.last_active_file = _active_file_context(msg)
+                # 새 요청은 새 작업이다. 이어가기 예산과 남은 지점은 여기서 초기화한다 —
+                # 한 작업이 무한루프에 빠져도 이후 작업까지 resume이 막히면 안 되고,
+                # 반대로 이전 작업의 지점을 새 요청에 재사용하면 이미 실행된 도구
+                # 결과가 엇갈린다.
+                session.pending_resume = None
+                session.resume_count = 0
+                # 새 작업이 이전 작업의 제안 카드를 물려받으면 안 된다.
+                session.last_proposal = None
                 project_id = msg.get("project_id") or DEFAULT_PROJECT
                 session.last_project_id = project_id
                 # Milestone A — 프로젝트 문맥을 시스템 메시지로 주입한다.
@@ -2068,6 +2136,51 @@ def handle_message(
                 if session.last_active_file:
                     extra["active_file"] = session.last_active_file
                 confirmed: list[Any] | None = None
+            elif message_type == "resume":
+                # 한도 중단 지점을 이어간다. 사용자는 문장을 다시 쓰지 않았고,
+                # 실제로 오간 대화를 그대로 넘긴다.
+                continuation = session.pending_resume
+                if continuation is None:
+                    return {
+                        "type": "response", "id": request_id,
+                        "status": "error",
+                        "error": "이어서 실행할 작업이 없습니다. 중단된 tool 루프가 없습니다.",
+                    }
+                if session.resume_count >= MAX_RESUMES:
+                    session.pending_resume = None
+                    return {
+                        "type": "response", "id": request_id,
+                        "status": "error",
+                        "error": (
+                            f"이어가기를 {MAX_RESUMES}번 사용했습니다. "
+                            "같은 요청을 그대로 반복하는 대신 작업을 나누어 요청해 주세요."
+                        ),
+                        "resumable": False,
+                    }
+                messages = [dict(m) for m in continuation.messages]
+                # system 줄은 앞쪽 system 블록 바로 뒤에 넣는다. 끝에 붙이면 일부
+                # 어댑터가 system을 첫 메시지로만 받는 제약에 걸린다.
+                head = 0
+                for message in messages:
+                    if message.get("role") == "system":
+                        head += 1
+                    else:
+                        break
+                messages.insert(
+                    head, {"role": "system", "content": _resume_system_line(continuation)}
+                )
+                system_messages = None
+                confirmed = None
+                # 소비한 지점은 비운다 — 같은 지점을 두 번 이어가면 이미 실행된
+                # 도구 결과가 transcript에 두 번 쌓인다.
+                session.pending_resume = None
+                session.resume_count += 1
+                extra = {"resumed": session.resume_count}
+                if session.last_project_id:
+                    extra["project_id"] = session.last_project_id
+                if session.last_active_file:
+                    extra["active_file"] = session.last_active_file
+
             else:  # confirm
                 tool_call = msg.get("tool_call")
                 if not isinstance(tool_call, dict) or not tool_call.get("name"):
@@ -2143,10 +2256,58 @@ def handle_message(
                     "scratch": scratch,
                 }
                 # AI Edit V1 — 제안이 있으면 diff를 그대로 실어 보낸다.
+                # 이번 trace에 없더라도 이 작업이 앞서 만든 제안이면 실어 보낸다
+                # (이어간 턴의 trace는 제안이 만들어진 턴을 포함하지 않는다).
                 proposal = _extract_edit_proposal(trace.get("events"))
+                if proposal is not None:
+                    session.last_proposal = proposal
+                else:
+                    proposal = session.last_proposal
                 if proposal is not None:
                     final["proposal"] = proposal
                 return final
+
+            # 알려진 종료 사유는 사람이 읽을 수 있는 문구를 그대로 올린다.
+            # 이전에는 finish_reason 이름만 위로 보내서, tool_loop_limit이 발생해도
+            # 앱에는 "예상하지 못한 finish_reason"이라는 무의미한 문자열만 남았다.
+            # 한도에 걸렸다면 모델이 무엇을 하려다 막혔는지(그리고 한도를 어디서
+            # 풀는지)가 그 문구에 들어 있으므로, 새로 만들어 버리지 않는다.
+            if response.finish_reason == "tool_loop_limit":
+                # 이어가기 지점을 저장하고, 버튼을 띄울 수 있는지 알려준다.
+                # 문자열 매칭으로 판단하지 않도록 resumable 플래그를 명시한다.
+                continuation = getattr(response, "continuation", None)
+                resumable = continuation is not None and session.resume_count < MAX_RESUMES
+                if continuation is not None:
+                    session.pending_resume = continuation
+                # 한도에 걸린 턴이 만든 제안도 기억해 둔다 — 이어간 턴에서
+                # 그대로 이어서 보여줄 수 있게.
+                found = _extract_edit_proposal(trace.get("events"))
+                if found is not None:
+                    session.last_proposal = found
+                message = response.content or (
+                    f"tool 루프 한도에 도달했습니다 "
+                    f"(max_turns={client.config.tool_loop_max_turns})."
+                )
+                # 상한 때문에 버튼이 사라진 경우에는 이유를 반드시 함께 말한다.
+                # 이유 없이 버튼만 사라지면 사용자는 "JARVIS가 고장 났구나"로
+                # 읽고 같은 작업을 통째로 다시 시도한다 — 그게 바로 상한이
+                # 막으려는 무한 반복이다.
+                if continuation is not None and session.resume_count >= MAX_RESUMES:
+                    message += (
+                        f" (이어가기를 이미 {MAX_RESUMES}번 사용했습니다. "
+                        "이어갈 수 없으니 작업을 나누어 다시 요청해 주세요.)"
+                    )
+                return {
+                    "type": "response", "id": request_id,
+                    "status": "error",
+                    "error": message,
+                    "finish_reason": response.finish_reason,
+                    "resumable": resumable,
+                    "resumes_remaining": max(0, MAX_RESUMES - session.resume_count),
+                    "tool_calls": [_serialize_call(c) for c in (response.tool_calls or [])],
+                    **trace,
+                    "scratch": scratch,
+                }
 
             return {
                 "type": "response", "id": request_id,

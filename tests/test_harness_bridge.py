@@ -6,9 +6,10 @@ import unittest
 from pathlib import Path
 
 from harness.config import HarnessConfig
-from harness.models import ChatResponse, ToolCall
+from harness.models import ChatResponse, LoopContinuation, ToolCall
 from harness.client import _active_file_context as _active_file_system_line
 from scripts.harness_bridge import (
+    MAX_RESUMES,
     BridgeSession,
     _active_file_context,
     handle_message,
@@ -53,6 +54,38 @@ class FakeClient:
         )
         response.trace_id = "trace-fake"
         return response
+
+
+class TracedFakeClient(FakeClient):
+    """trace_id를 호출마다 지정 — 한 작업 안의 여러 trace를 흉내 낸다."""
+
+    def __init__(self, responses, memory_dir, trace_dir, trace_ids):
+        super().__init__(responses, memory_dir, trace_dir)
+        self._trace_ids = list(trace_ids)
+
+    def chat_with_tools(self, messages, **kwargs):
+        response = super().chat_with_tools(messages, **kwargs)
+        response.trace_id = (
+            self._trace_ids.pop(0) if self._trace_ids else "trace-fake"
+        )
+        return response
+
+
+def write_trace(trace_dir: Path, trace_id: str, tool_names: list[str]) -> None:
+    """canonical trace 파일을 직접 쓴다 — bridge는 trace에서 events를 만든다."""
+    results = []
+    for name in tool_names:
+        results.append({
+            "call": {"id": f"call-{name}", "name": name, "arguments": {}},
+            "result": {
+                "ok": True,
+                "data": {"proposal": {"proposal_id": f"e-{name}", "path": "a.md"}},
+            },
+        })
+    (trace_dir / f"{trace_id}.json").write_text(
+        json.dumps({"trace_id": trace_id, "tool_results": results}, ensure_ascii=False),
+        encoding="utf-8",
+    )
 
 
 def proposed_call(title="새 task") -> ToolCall:
@@ -333,6 +366,142 @@ class HandleMessageTests(unittest.TestCase):
             {"type": "chat", "id": 8, "text": "계속해", "project_id": "jarvis-app"},
         )
         self.assertEqual(response["status"], "error")
+
+    def test_tool_loop_limit_reports_the_real_reason_not_a_generic_error(self) -> None:
+        # 앱에 "예상하지 못한 finish_reason"만 올리면 사용자는 한도 때문에
+        # 멈췄다는 사실조차 알 수 없다. 한도 사유는 사람이 읽을 수 있는
+        # 문구로, 그 문구가 대체로 알려주는 바로 그 값(회수)을 실어 보낸다.
+        client = self._client(
+            ChatResponse(
+                content="tool 루프 한도(4회)에 도달해 중단합니다. 마지막 tool 요청(실행 안 함): create_task",
+                tool_calls=[proposed_call()],
+                finish_reason="tool_loop_limit",
+            )
+        )
+        response = handle_message(
+            client, BridgeSession(),
+            {"type": "chat", "id": 9, "text": "계속해", "project_id": "jarvis-app"},
+        )
+        self.assertEqual(response["status"], "error")
+        self.assertNotIn("예상하지 못한", response["error"])
+        self.assertIn("한도", response["error"])
+        self.assertIn("4회", response["error"])
+        self.assertEqual(response["finish_reason"], "tool_loop_limit")
+        # 멈췄다는 사실과 함께, 무엇을 하려다 막혔는지도 남는다.
+        self.assertEqual(
+            [c["name"] for c in response["tool_calls"]], ["create_task"]
+        )
+
+    def test_tool_loop_limit_falls_back_when_content_is_empty(self) -> None:
+        client = self._client(
+            ChatResponse(
+                content="",
+                tool_calls=[proposed_call()],
+                finish_reason="tool_loop_limit",
+            )
+        )
+        response = handle_message(
+            client, BridgeSession(),
+            {"type": "chat", "id": 10, "text": "계속해", "project_id": "jarvis-app"},
+        )
+        self.assertEqual(response["status"], "error")
+        self.assertIn("max_turns", response["error"])
+
+    def _limit_response(self) -> ChatResponse:
+        return ChatResponse(
+            content="tool 루프 한도(4회)에 도달해 중단합니다.",
+            tool_calls=[proposed_call()],
+            finish_reason="tool_loop_limit",
+            continuation=LoopContinuation(
+                messages=[{"role": "user", "content": "계속해"}],
+                blocked_tool_calls=[ToolCall(name="create_task", arguments={})],
+                turns=4,
+                max_turns=4,
+            ),
+        )
+
+    def test_resume_final_still_carries_a_proposal_made_before_the_limit(self) -> None:
+        # 제안은 한 trace 안에서만 보인다. 한도에 걸린 턴이 제안까지 만든 뒤
+        # 끊기고 이어간 턴이 새 trace에서 돌면, 이어간 응답에는 edit_file 결과가
+        # 없다. 그래서 제안이 renderer로 올라가지 않고 사용자는 승인 수단을
+        # 잃는다 — 같은 작업의 제안이므로 이어서 보여줘야 한다.
+        write_trace(self.trace, "t1", ["read_file", "edit_file"])
+        write_trace(self.trace, "t2", ["get_project_context"])
+        client = TracedFakeClient(
+            [self._limit_response(), ChatResponse(content="제안을 만들었습니다.")],
+            self.memory,
+            self.trace,
+            ["t1", "t2"],
+        )
+        session = BridgeSession()
+        handle_message(
+            client, session,
+            {"type": "chat", "id": 20, "text": "수정해줘", "project_id": "jarvis-app"},
+        )
+        response = handle_message(client, session, {"type": "resume", "id": 21})
+        self.assertEqual(response["status"], "final")
+        self.assertEqual(
+            (response.get("proposal") or {}).get("proposal_id"), "e-edit_file"
+        )
+
+    def test_a_new_task_does_not_inherit_the_previous_proposal(self) -> None:
+        # 새 작업에서 예전 제안 카드가 뜨면 사용자가 엉뚱한 diff를 승인한다.
+        write_trace(self.trace, "t1", ["edit_file"])
+        write_trace(self.trace, "t2", ["get_project_context"])
+        client = TracedFakeClient(
+            [
+                self._limit_response(),
+                ChatResponse(content="요약했습니다."),
+            ],
+            self.memory,
+            self.trace,
+            ["t1", "t2"],
+        )
+        session = BridgeSession()
+        handle_message(
+            client, session,
+            {"type": "chat", "id": 22, "text": "수정해줘", "project_id": "jarvis-app"},
+        )
+        self.assertIsNotNone(session.last_proposal)
+        response = handle_message(
+            client, session,
+            {"type": "chat", "id": 23, "text": "새 작업", "project_id": "jarvis-app"},
+        )
+        self.assertEqual(response["status"], "final")
+        self.assertIsNone(response.get("proposal"))
+
+    def test_loop_limit_offers_resume_while_budget_remains(self) -> None:
+        client = self._client(self._limit_response())
+        response = handle_message(
+            client, BridgeSession(),
+            {"type": "chat", "id": 11, "text": "계속해", "project_id": "jarvis-app"},
+        )
+        self.assertTrue(response["resumable"])
+        self.assertEqual(response["resumes_remaining"], MAX_RESUMES)
+        self.assertNotIn("이어가기를 이미", response["error"])
+
+    def test_loop_limit_explains_the_cap_when_resume_runs_out(self) -> None:
+        # 상한에 닿으면 버튼이 사라진다. 이유를 말하지 않으면 사용자는
+        # "고장 났구나"로 읽고 같은 작업을 통째로 다시 시도한다 — 그게 바로
+        # 상한이 막으려는 무한 반복이다. 그래서 사라지는 이유를 함께 실어 보낸다.
+        #
+        # 상한은 resume을 반복해야 닿는다(chat은 예산을 초기화하므로).
+        client = self._client(*[self._limit_response() for _ in range(MAX_RESUMES + 1)])
+        session = BridgeSession()
+        first = handle_message(
+            client, session,
+            {"type": "chat", "id": 12, "text": "계속해", "project_id": "jarvis-app"},
+        )
+        self.assertTrue(first["resumable"])
+        response = first
+        for i in range(MAX_RESUMES):
+            response = handle_message(client, session, {"type": "resume", "id": 13 + i})
+            self.assertEqual(response["status"], "error")
+            self.assertEqual(response["finish_reason"], "tool_loop_limit")
+        self.assertFalse(response["resumable"])
+        self.assertEqual(response["resumes_remaining"], 0)
+        self.assertIn(f"이어가기를 이미 {MAX_RESUMES}번 사용", response["error"])
+        self.assertIn("작업을 나누어", response["error"])
 
 
 class RunBridgeProtocolTests(unittest.TestCase):
