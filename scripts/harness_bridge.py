@@ -42,6 +42,31 @@ import sys
 from pathlib import Path
 from typing import Any, Callable, TextIO
 
+from harness.agent_runs import (
+    AgentRunError,
+    AgentRunStore,
+    TERMINAL_STATUSES,
+    default_agent_runs_file,
+    get_runner,
+    start_verification,
+)
+from harness.agent_sessions import (
+    AGENT_TYPES,
+    AgentSessionError,
+    AgentSessionStore,
+    default_agent_sessions_file,
+)
+from harness.freebuff_client import (
+    THREAD_ID_RE,
+    FreebuffError,
+    detect_install,
+    validate_thread,
+)
+from datetime import datetime, timezone
+
+
+def _now_iso_for_bridge() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 from harness.client import HarnessClient
 from harness.config import PROJECT_ROOT, HarnessConfig
 from harness.trace import TraceRecorder
@@ -87,6 +112,575 @@ DEFAULT_SCRATCH = PROJECT_ROOT / "data" / "electron_scratch"
 # 예산을 다시 주되 횟수를 제한하면, 실제 편집 작업 한 건은 끝낼 수 있으면서
 # 무한 루프는 구조적으로 불가능하다.
 MAX_RESUMES = 3
+
+# Agent Delegation V1 — bridge 프로세스당 runner/스토어 캐시.
+# runner는 살아 있는 자식 프로세스 핸들을 들고 있으므로 요청마다 새로 만들면 안 된다.
+_AGENT_RUN_STORE: AgentRunStore | None = None
+_AGENT_RUNNERS: dict[str, Any] = {}
+_AGENT_SESSION_STORE: AgentSessionStore | None = None
+
+
+def agent_session_store(client: HarnessClient) -> AgentSessionStore:
+    """bridge 프로세스 수명 동안 하나의 store 인스턴스 (agent_run_store와 동일 규약)."""
+    global _AGENT_SESSION_STORE
+    memory_dir = client.config.memory_dir
+    if memory_dir is None or not Path(memory_dir).is_dir():
+        raise AgentSessionError("memory_dir 미설정 — JARVIS state 경로가 없습니다")
+    if _AGENT_SESSION_STORE is None or _AGENT_SESSION_STORE.registry_file.parent != Path(
+        memory_dir
+    ).resolve():
+        _AGENT_SESSION_STORE = AgentSessionStore(default_agent_sessions_file(memory_dir))
+    return _AGENT_SESSION_STORE
+
+
+def agent_run_store(client: HarnessClient) -> AgentRunStore:
+    """bridge 프로세스 수명 동안 하나의 store 인스턴스를 재사용한다.
+
+    memory_dir가 바뀌면(테스트가 새 state dir를 쓸 때) 재바인딩한다 — runner
+    캐시도 함께 비운다. 프로덕션에서는 memory_dir가 프로세스 수명 동안 고정이므로
+    이 분기는 테스트 격리를 위한 것이다.
+    """
+    global _AGENT_RUN_STORE
+    memory_dir = client.config.memory_dir
+    if memory_dir is None or not Path(memory_dir).is_dir():
+        raise AgentRunError("memory_dir 미설정 — JARVIS state 경로가 없습니다")
+    if _AGENT_RUN_STORE is None or _AGENT_RUN_STORE.registry_file.parent != Path(
+        memory_dir
+    ).resolve():
+        _AGENT_RUN_STORE = AgentRunStore(default_agent_runs_file(memory_dir))
+        _AGENT_RUNNERS.clear()
+    return _AGENT_RUN_STORE
+
+
+def _agent_runner(client: HarnessClient, agent_type: str) -> Any:
+    runner = _AGENT_RUNNERS.get(agent_type)
+    if runner is None:
+        runner = get_runner(agent_type, agent_run_store(client), client.config.memory_dir)
+        _AGENT_RUNNERS[agent_type] = runner
+    return runner
+
+
+# 승인된 Workspace root 경로 안인지 — Security §14 (workspace boundaries).
+def _resolve_repo_path(client: HarnessClient, repo_path: Any) -> str:
+    if not isinstance(repo_path, str) or not repo_path.strip():
+        raise AgentRunError("repo_path가 비어 있습니다")
+    try:
+        candidate = Path(repo_path).resolve()
+    except OSError as exc:
+        raise AgentRunError(f"repo_path를 해석할 수 없습니다: {exc}") from exc
+    roots = resolve_effective_roots(
+        client.config.memory_dir, client.config.file_roots
+    )
+    for root in roots.values():
+        try:
+            root_resolved = Path(root).resolve()
+        except OSError:
+            continue
+        if candidate == root_resolved or root_resolved in candidate.parents:
+            return str(candidate)
+    raise AgentRunError(
+        f"승인된 Workspace root 밖의 경로는 위임할 수 없습니다: {repo_path}"
+    )
+
+
+def _agent_run_payload(run: dict[str, Any]) -> dict[str, Any]:
+    """renderer로 보낼 run 요약 — instruction 전문은 생략(길이), 나머지는 그대로."""
+    payload = {k: v for k, v in run.items() if k != "instruction"}
+    payload["instruction"] = str(run.get("instruction") or "")[:200]
+    return payload
+
+
+def _agent_run_start(client: HarnessClient, request_id: Any, payload: dict[str, Any]) -> dict[str, Any]:
+    """Agent Delegation V1 — Task를 Codex AgentRun에 위임 (즉시 반환, 폴링 계약).
+
+    renderer가 넘기는 것은 agent_type/task_id/instruction/repo_path 같은
+    constrained 값뿐이다. 실제 CLI argv는 CodexRunner가 조립한다 — 모델이나
+    renderer가 command string을 넘기는 구조를 만들지 않는다(§14).
+    """
+    try:
+        memory_dir = client.config.memory_dir
+        if memory_dir is None or not Path(memory_dir).is_dir():
+            return {
+                "type": "response", "id": request_id, "status": "error",
+                "error": "memory_dir 미설정 — JARVIS state 경로가 없습니다",
+            }
+        agent_type = str(payload.get("agent_type") or "codex").strip()
+        instruction = payload.get("instruction")
+        if not isinstance(instruction, str) or not instruction.strip():
+            return {
+                "type": "response", "id": request_id, "status": "error",
+                "error": "instruction이 비어 있습니다",
+            }
+        instruction = instruction.strip()
+        if len(instruction) > 20000:
+            return {
+                "type": "response", "id": request_id, "status": "error",
+                "error": "instruction이 너무 깁니다 (최대 20000자)",
+            }
+        task_id = payload.get("task_id")
+        if task_id is not None:
+            if not isinstance(task_id, str) or not task_id.strip():
+                return {
+                    "type": "response", "id": request_id, "status": "error",
+                    "error": "task_id 형식이 잘못되었습니다",
+                }
+            task_id = task_id.strip()
+            task = TaskStore(
+                client.config.task_file or (Path(memory_dir) / "tasks.md"),
+                memory_dir=memory_dir,
+            ).find_task(task_id)
+            if task is None:
+                return {
+                    "type": "response", "id": request_id, "status": "error",
+                    "error": f"알 수 없는 task: {task_id}",
+                }
+        repo_path = _resolve_repo_path(client, payload.get("repo_path"))
+
+        # AgentSession integration (마일스톤 §5) — session에서 run을 시작하면
+        # session의 agent_type/task_id가 authoritative다. renderer가 서로 모순되는
+        # 조합(session=Freebuff + agent_type=codex + 남의 task)을 만들지 못하게
+        # Harness가 결정하고, run에 session_id를 새긴다. 기존 run(session_id 없음)은
+        # 영향받지 않는다(migration-safe: session_id 없는 run은 그대로 codex 위임).
+        session = None
+        requested_session_id = payload.get("session_id")
+        if isinstance(requested_session_id, str) and requested_session_id.strip():
+            sessions = agent_session_store(client)
+            session = sessions.get(requested_session_id.strip())
+            if session is None:
+                raise AgentRunError(f"알 수 없는 session: {requested_session_id}")
+            if session.get("status") == "archived":
+                raise AgentRunError("archived session에서는 run을 시작할 수 없습니다")
+            agent_type = str(session.get("agent_type") or agent_type)
+            session_task_id = session.get("task_id")
+            if session_task_id:
+                task_id = session_task_id
+            session_workspace = session.get("workspace")
+            if session_workspace:
+                resolved_session_ws = Path(session_workspace).resolve()
+                if resolved_session_ws != Path(repo_path).resolve():
+                    repo_path = str(resolved_session_ws)
+
+        store = agent_run_store(client)
+        runner = _agent_runner(client, agent_type)
+        run = store.create_run(
+            agent_type=agent_type,
+            instruction=instruction,
+            repo_path=repo_path,
+            task_id=task_id,
+            project_id=payload.get("project_id") if isinstance(payload.get("project_id"), str) else None,
+            session_id=session["session_id"] if session is not None else None,
+        )
+        runner.start(run["run_id"], {
+            "repo_path": repo_path,
+            "instruction": instruction,
+        })
+        if session is not None:
+            try:
+                agent_session_store(client).record_run_link(
+                    session["session_id"], run["run_id"]
+                )
+            except AgentSessionError:
+                pass  # 세션 링크 기록은 부수효과 — run 시작을 막지 않는다
+        updated = store.get(run["run_id"]) or run
+        _record_activity(
+            client,
+            project_id=payload.get("project_id") or DEFAULT_PROJECT,
+            operation="agent_run_start",
+            arguments={
+                "run_id": run["run_id"],
+                "agent_type": agent_type,
+                "task_id": task_id,
+                "repo_path": repo_path,
+                **({"session_id": session["session_id"]} if session else {}),
+            },
+            summary=f"AgentRun 시작: {agent_type} ({run['run_id']})",
+        )
+        return {
+            "type": "response", "id": request_id, "status": "ok",
+            "run": _agent_run_payload(updated),
+            "scratch": _is_scratch_dir(memory_dir),
+        }
+    except AgentRunError as exc:
+        return {"type": "response", "id": request_id, "status": "error", "error": str(exc)}
+    except Exception as exc:
+        return {
+            "type": "response", "id": request_id, "status": "error",
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
+
+def _agent_run_status(client: HarnessClient, request_id: Any, payload: dict[str, Any]) -> dict[str, Any]:
+    try:
+        run_id = payload.get("run_id")
+        if not isinstance(run_id, str) or not run_id.strip():
+            raise AgentRunError("run_id가 비어 있습니다")
+        runner = _agent_runner(client, payload.get("agent_type") or "codex")
+        run = runner.status(run_id.strip())
+        return {
+            "type": "response", "id": request_id, "status": "ok",
+            "run": _agent_run_payload(run),
+        }
+    except AgentRunError as exc:
+        return {"type": "response", "id": request_id, "status": "error", "error": str(exc)}
+    except Exception as exc:
+        return {
+            "type": "response", "id": request_id, "status": "error",
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
+
+def _agent_run_list(client: HarnessClient, request_id: Any, payload: dict[str, Any]) -> dict[str, Any]:
+    try:
+        store = agent_run_store(client)
+        runs = store.list_runs(limit=int(payload.get("limit") or 20))
+        task_id = payload.get("task_id")
+        if isinstance(task_id, str) and task_id.strip():
+            runs = [r for r in runs if r.get("task_id") == task_id.strip()]
+        return {
+            "type": "response", "id": request_id, "status": "ok",
+            "runs": [_agent_run_payload(r) for r in runs],
+        }
+    except AgentRunError as exc:
+        return {"type": "response", "id": request_id, "status": "error", "error": str(exc)}
+    except Exception as exc:
+        return {
+            "type": "response", "id": request_id, "status": "error",
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
+
+def _agent_run_cancel(client: HarnessClient, request_id: Any, payload: dict[str, Any]) -> dict[str, Any]:
+    try:
+        run_id = payload.get("run_id")
+        if not isinstance(run_id, str) or not run_id.strip():
+            raise AgentRunError("run_id가 비어 있습니다")
+        store = agent_run_store(client)
+        run = store.get(run_id.strip())
+        if run is None:
+            raise AgentRunError(f"알 수 없는 run: {run_id}")
+        if run.get("status") in TERMINAL_STATUSES:
+            return {
+                "type": "response", "id": request_id, "status": "ok",
+                "run": _agent_run_payload(run),
+            }
+        runner = _agent_runner(client, run.get("agent_type") or "codex")
+        run = runner.cancel(run_id.strip())
+        _record_activity(
+            client,
+            project_id=run.get("project_id") or DEFAULT_PROJECT,
+            operation="agent_run_cancel",
+            arguments={"run_id": run_id.strip()},
+            summary=f"AgentRun 중단 요청: {run_id.strip()}",
+        )
+        return {
+            "type": "response", "id": request_id, "status": "ok",
+            "run": _agent_run_payload(run),
+        }
+    except AgentRunError as exc:
+        return {"type": "response", "id": request_id, "status": "error", "error": str(exc)}
+    except Exception as exc:
+        return {
+            "type": "response", "id": request_id, "status": "error",
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
+
+def _agent_run_verify(client: HarnessClient, request_id: Any, payload: dict[str, Any]) -> dict[str, Any]:
+    """completed run에 verify:fast — 별도 post-run action(자동 실행 아님)."""
+    try:
+        run_id = payload.get("run_id")
+        if not isinstance(run_id, str) or not run_id.strip():
+            raise AgentRunError("run_id가 비어 있습니다")
+        command = str(payload.get("command") or "verify:fast").strip() or "verify:fast"
+        store = agent_run_store(client)
+        run = start_verification(store, run_id.strip(), command)
+        _record_activity(
+            client,
+            project_id=run.get("project_id") or DEFAULT_PROJECT,
+            operation="agent_run_verify",
+            arguments={"run_id": run_id.strip(), "command": command},
+            summary=f"AgentRun 검증 시작: {command} ({run_id.strip()})",
+        )
+        return {
+            "type": "response", "id": request_id, "status": "ok",
+            "run": _agent_run_payload(run),
+        }
+    except AgentRunError as exc:
+        return {"type": "response", "id": request_id, "status": "error", "error": str(exc)}
+    except Exception as exc:
+        return {
+            "type": "response", "id": request_id, "status": "error",
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
+
+def _agent_session_payload(session: dict[str, Any]) -> dict[str, Any]:
+    """renderer로 보낼 session 요약 — 현재는 전체 필드가 모두 UI에 필요하다."""
+    return dict(session)
+
+
+def _agent_session_create(client: HarnessClient, request_id: Any, payload: dict[str, Any]) -> dict[str, Any]:
+    """AgentSession 생성 (§3/§9). Freebuff면 기존 thread UUID binding이 필수 경로.
+
+    thread metadata가 오면(orchestrator 가용) 사용자 입력보다 실제 thread 값을
+    authoritative하게 쓴다(§9) — renderer가 model을 속일 수 없다.
+    """
+    try:
+        memory_dir = client.config.memory_dir
+        if memory_dir is None or not Path(memory_dir).is_dir():
+            return {
+                "type": "response", "id": request_id, "status": "error",
+                "error": "memory_dir 미설정 — JARVIS state 경로가 없습니다",
+            }
+        agent_type = str(payload.get("agent_type") or "").strip()
+        if not agent_type:
+            agent_type = "freebuff"  # V1 default (§8)
+        task_id = payload.get("task_id")
+        if isinstance(task_id, str) and task_id.strip():
+            task_id = task_id.strip()
+            task = TaskStore(
+                client.config.task_file or (Path(memory_dir) / "tasks.md"),
+                memory_dir=memory_dir,
+            ).find_task(task_id)
+            if task is None:
+                return {
+                    "type": "response", "id": request_id, "status": "error",
+                    "error": f"알 수 없는 task: {task_id}",
+                }
+        else:
+            task_id = None
+        external_session_id = payload.get("external_session_id")
+        if agent_type == "freebuff" and not (
+            isinstance(external_session_id, str) and external_session_id.strip()
+        ):
+            # §13: V1은 existing thread binding만 — zero-message draft persistence
+            # 문제가 있어 신규 thread 자동 생성은 하지 않는다.
+            return {
+                "type": "response", "id": request_id, "status": "error",
+                "error": "Freebuff 세션은 기존 thread UUID(external_session_id)가 필요합니다",
+            }
+
+        model = payload.get("model")
+        reasoning_effort = payload.get("reasoning_effort")
+        validation = None
+        if agent_type == "freebuff" and isinstance(external_session_id, str):
+            workspace = str(payload.get("workspace") or "").strip()
+            if not workspace:
+                return {
+                    "type": "response", "id": request_id, "status": "error",
+                    "error": "Freebuff 세션 binding에는 workspace 경로가 필요합니다",
+                }
+            try:
+                capability = validate_thread(workspace, external_session_id.strip())
+                validation = capability.as_dict()
+            except Exception as exc:  # validation 실패가 binding 자체를 막지 않는다(§10 degraded)
+                validation = {
+                    "status": "unavailable",
+                    "detail": f"{type(exc).__name__}: {exc}",
+                }
+            if validation.get("status") == "available" and isinstance(validation.get("thread"), dict):
+                thread = validation["thread"]
+                if thread.get("model"):
+                    model = str(thread["model"])  # 실제 thread metadata가 우선(§9)
+                effort = thread.get("reasoningEffort")
+                if effort:
+                    reasoning_effort = str(effort)
+
+        store = agent_session_store(client)
+        session = store.create_session(
+            agent_type=agent_type,
+            task_id=task_id,
+            project_id=payload.get("project_id") if isinstance(payload.get("project_id"), str) else None,
+            purpose=payload.get("purpose") if isinstance(payload.get("purpose"), str) else None,
+            workspace_root_id=payload.get("workspace_root_id") if isinstance(payload.get("workspace_root_id"), str) else None,
+            workspace=payload.get("workspace") if isinstance(payload.get("workspace"), str) else None,
+            external_session_id=external_session_id if isinstance(external_session_id, str) else None,
+            model=model if isinstance(model, str) else None,
+            reasoning_effort=reasoning_effort if isinstance(reasoning_effort, str) else None,
+        )
+        if validation is not None:
+            try:
+                session = store.update(
+                    session["session_id"],
+                    last_validated_at=_now_iso_for_bridge(),
+                    last_validation=validation,
+                )
+            except AgentSessionError:
+                pass
+        _record_activity(
+            client,
+            project_id=payload.get("project_id") or DEFAULT_PROJECT,
+            operation="agent_session_create",
+            arguments={
+                "session_id": session["session_id"],
+                "agent_type": agent_type,
+                "task_id": task_id,
+                "external_session_id": session.get("external_session_id"),
+            },
+            summary=f"AgentSession 생성: {agent_type} ({session['session_id']})",
+        )
+        return {
+            "type": "response", "id": request_id, "status": "ok",
+            "session": _agent_session_payload(session),
+            "validation": validation,
+        }
+    except AgentSessionError as exc:
+        return {"type": "response", "id": request_id, "status": "error", "error": str(exc)}
+    except Exception as exc:
+        return {
+            "type": "response", "id": request_id, "status": "error",
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
+
+def _agent_session_get(client: HarnessClient, request_id: Any, payload: dict[str, Any]) -> dict[str, Any]:
+    try:
+        session_id = payload.get("session_id")
+        if not isinstance(session_id, str) or not session_id.strip():
+            return {"type": "response", "id": request_id, "status": "error", "error": "session_id가 필요합니다"}
+        session = agent_session_store(client).get(session_id.strip())
+        if session is None:
+            return {"type": "response", "id": request_id, "status": "error", "error": f"알 수 없는 session: {session_id}"}
+        return {
+            "type": "response", "id": request_id, "status": "ok",
+            "session": _agent_session_payload(session),
+        }
+    except Exception as exc:
+        return {
+            "type": "response", "id": request_id, "status": "error",
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
+
+def _agent_session_list(client: HarnessClient, request_id: Any, payload: dict[str, Any]) -> dict[str, Any]:
+    try:
+        agent_type = payload.get("agent_type")
+        task_id = payload.get("task_id")
+        sessions = agent_session_store(client).list_sessions(
+            agent_type=agent_type if isinstance(agent_type, str) and agent_type.strip() else None,
+            task_id=task_id if isinstance(task_id, str) and task_id.strip() else None,
+            include_archived=bool(payload.get("include_archived")),
+        )
+        return {
+            "type": "response", "id": request_id, "status": "ok",
+            "sessions": [_agent_session_payload(s) for s in sessions],
+        }
+    except Exception as exc:
+        return {
+            "type": "response", "id": request_id, "status": "error",
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
+
+def _agent_session_update(client: HarnessClient, request_id: Any, payload: dict[str, Any]) -> dict[str, Any]:
+    """세션 metadata 수정 — status/purpose/model 등 화이트리스트 필드만."""
+    try:
+        session_id = payload.get("session_id")
+        if not isinstance(session_id, str) or not session_id.strip():
+            return {"type": "response", "id": request_id, "status": "error", "error": "session_id가 필요합니다"}
+        fields = payload.get("fields")
+        if not isinstance(fields, dict):
+            return {"type": "response", "id": request_id, "status": "error", "error": "fields 객체가 필요합니다"}
+        session = agent_session_store(client).update(session_id.strip(), **fields)
+        _record_activity(
+            client,
+            project_id=DEFAULT_PROJECT,
+            operation="agent_session_update",
+            arguments={"session_id": session_id.strip(), "fields": sorted(fields.keys())},
+            summary=f"AgentSession 수정: {session_id.strip()}",
+        )
+        return {
+            "type": "response", "id": request_id, "status": "ok",
+            "session": _agent_session_payload(session),
+        }
+    except AgentSessionError as exc:
+        return {"type": "response", "id": request_id, "status": "error", "error": str(exc)}
+    except Exception as exc:
+        return {
+            "type": "response", "id": request_id, "status": "error",
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
+
+def _agent_session_archive(client: HarnessClient, request_id: Any, payload: dict[str, Any]) -> dict[str, Any]:
+    try:
+        session_id = payload.get("session_id")
+        if not isinstance(session_id, str) or not session_id.strip():
+            return {"type": "response", "id": request_id, "status": "error", "error": "session_id가 필요합니다"}
+        session = agent_session_store(client).archive(session_id.strip())
+        _record_activity(
+            client,
+            project_id=DEFAULT_PROJECT,
+            operation="agent_session_archive",
+            arguments={"session_id": session_id.strip()},
+            summary=f"AgentSession 보관: {session_id.strip()}",
+        )
+        return {
+            "type": "response", "id": request_id, "status": "ok",
+            "session": _agent_session_payload(session),
+        }
+    except AgentSessionError as exc:
+        return {"type": "response", "id": request_id, "status": "error", "error": str(exc)}
+    except Exception as exc:
+        return {
+            "type": "response", "id": request_id, "status": "error",
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
+
+def _freebuff_session_validate(client: HarnessClient, request_id: Any, payload: dict[str, Any]) -> dict[str, Any]:
+    """§9/§10 — 기존 thread의 read-only validation. state를 수정하지 않는다.
+
+    알려진 session_id가 오면 검증 결과를 session metadata에도 반영하고(§16 broken
+    표시), 없으면 순수 조회로 끝난다.
+    """
+    try:
+        workspace = str(payload.get("workspace") or "").strip()
+        external_session_id = str(payload.get("external_session_id") or "").strip()
+        if not workspace or not external_session_id:
+            return {
+                "type": "response", "id": request_id, "status": "error",
+                "error": "workspace와 external_session_id가 필요합니다",
+            }
+        capability = validate_thread(workspace, external_session_id)
+        result = capability.as_dict()
+        session_id = payload.get("session_id")
+        if isinstance(session_id, str) and session_id.strip():
+            try:
+                agent_session_store(client).update(
+                    session_id.strip(),
+                    last_validated_at=_now_iso_for_bridge(),
+                    last_validation=result,
+                )
+            except AgentSessionError:
+                pass
+        return {
+            "type": "response", "id": request_id, "status": "ok",
+            "capability": result,
+        }
+    except Exception as exc:
+        return {
+            "type": "response", "id": request_id, "status": "error",
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
+
+def mark_agent_runs_interrupted(client: HarnessClient) -> list[dict[str, Any]]:
+    """bridge 시작 직후 — 이전 프로세스가 running으로 남긴 run을 정직하게 표시.
+
+    고아 프로세스를 자동 kill하지 않는다: restart 후 pid는 재사용되었을 수 있고
+    그 pid가 지금 다른 프로그램일 수 있다. 대신 살아 있으면 그 사실을 error에
+    적어 사용자가 직접 판단하게 한다(작업 관리자에서 정리). cancel 경로는 실제
+    프로세스 핸들로 죽이므로 여기와 다르다.
+    """
+    try:
+        store = agent_run_store(client)
+    except AgentRunError:
+        return []
+    try:
+        return store.mark_interrupted_on_startup()
+    except Exception:
+        return []
 
 
 def _call_name(call: Any) -> str:
@@ -155,6 +749,7 @@ def get_canonical_user_state_dir() -> Path:
 #   resource_links.json          — resource_links (Task↔File 연결, M2)
 #   file_refs.json               — workspace (FileRef identity)
 #   page_identity.json           — page_store (pages/의 형제)
+#   agent_runs.json              — agent_runs (Agent Delegation V1)
 STATE_FILES: tuple[str, ...] = (
     "projects.md",
     "tasks.md",
@@ -899,6 +1494,9 @@ def _project_workspace_children(
             "status": "available" if pw["available"] else "unavailable",
             "root_id": pw["root_id"],
             "available": pw["available"],
+            # Agent Delegation V1 — AgentRun 위임 시 repo_path 후보. 승인 root
+            # 경계 검증은 agent_run_start가 다시 한다(여기선 경로 노출만).
+            **({"device_path": pw["device_path"]} if pw.get("device_path") else {}),
             **({"reason": pw["reason"]} if pw.get("reason") else {}),
         }],
     }]
@@ -2079,6 +2677,41 @@ def handle_message(
         if message_type == "list_workspace_roots":
             return _list_workspace_roots(client, request_id, msg)
 
+        if message_type == "agent_run_start":
+            # Agent Delegation V1 — Task를 Codex AgentRun에 위임. 즉시 반환하고
+            # 진행은 agent_run_status 폴링으로 본다(bridge 순차 루프 보호).
+            return _agent_run_start(client, request_id, msg)
+
+        if message_type == "agent_run_status":
+            return _agent_run_status(client, request_id, msg)
+
+        if message_type == "agent_run_list":
+            return _agent_run_list(client, request_id, msg)
+
+        if message_type == "agent_run_cancel":
+            return _agent_run_cancel(client, request_id, msg)
+
+        if message_type == "agent_run_verify":
+            return _agent_run_verify(client, request_id, msg)
+
+        if message_type == "agent_session_create":
+            return _agent_session_create(client, request_id, msg)
+
+        if message_type == "agent_session_get":
+            return _agent_session_get(client, request_id, msg)
+
+        if message_type == "agent_session_list":
+            return _agent_session_list(client, request_id, msg)
+
+        if message_type == "agent_session_update":
+            return _agent_session_update(client, request_id, msg)
+
+        if message_type == "agent_session_archive":
+            return _agent_session_archive(client, request_id, msg)
+
+        if message_type == "freebuff_session_validate":
+            return _freebuff_session_validate(client, request_id, msg)
+
         if message_type == "register_workspace_root":
             return _register_workspace_root(client, request_id, msg)
 
@@ -2388,6 +3021,7 @@ def main(argv: list[str] | None = None) -> int:
 
     ensure_scratch_seed(config.memory_dir)
     client = build_client(config)
+    mark_agent_runs_interrupted(client)
 
     # 줄 단위 버퍼링 없이 즉시 flush (Electron main이 라인 단위로 읽음)
     run_bridge(
